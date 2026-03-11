@@ -1,0 +1,7 @@
+audio/
+articles.json
+report.html
+report_daily.html
+auto_collect.log
+__pycache__/
+*.pyc
