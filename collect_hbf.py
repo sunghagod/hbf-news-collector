@@ -18,6 +18,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 import feedparser
 import requests
 from urllib.parse import quote_plus, urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── 설정 ──────────────────────────────────────────────
 OUTPUT_DIR = Path(__file__).parent
@@ -295,39 +296,44 @@ def main():
             unique.append(art)
     print(f"중복 제거: {len(unique)}건")
 
-    # URL 추출 + 한국 언론 필터
-    print("URL 추출 중...")
-    enriched = []
-    blocked = 0
-    for i, art in enumerate(unique):
-        if (i + 1) % 20 == 0 or i == 0:
-            print(f"  [{i+1}/{len(unique)}]...")
+    # URL 추출 + 한국 언론 필터 (병렬 처리)
+    print(f"URL 추출 중... ({len(unique)}건, 병렬 20스레드)")
 
+    def resolve_url(art):
         real_url = art['link']
         try:
-            resp = requests.head(art['link'], headers=HEADERS, timeout=8, allow_redirects=True)
+            resp = requests.head(art['link'], headers=HEADERS, timeout=6, allow_redirects=True)
             if resp.url:
                 real_url = resp.url
         except Exception:
             try:
-                resp = requests.get(art['link'], headers=HEADERS, timeout=10, allow_redirects=True, stream=True)
+                resp = requests.get(art['link'], headers=HEADERS, timeout=8, allow_redirects=True, stream=True)
                 real_url = resp.url
                 resp.close()
             except Exception:
                 pass
+        art['real_url'] = real_url
+        return art
 
-        # 한국 언론사 차단
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(resolve_url, art): art for art in unique}
+        done_count = 0
+        for future in as_completed(futures):
+            done_count += 1
+            if done_count % 50 == 0 or done_count == len(unique):
+                print(f"  [{done_count}/{len(unique)}]...")
+
+    enriched = []
+    blocked = 0
+    for art in unique:
+        real_url = art.get('real_url', art['link'])
         if is_korean_source(real_url):
             blocked += 1
             continue
-
-        art['real_url'] = real_url
         art['tier'] = get_source_tier(real_url)
         if not art['source_name']:
             art['source_name'] = get_source_name(real_url)
-
         enriched.append(art)
-        time.sleep(0.15)
 
     enriched.sort(key=lambda x: (
         x.get('tier', 4),

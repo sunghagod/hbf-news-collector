@@ -147,18 +147,18 @@ def main():
         if d:
             by_date[d].append(art)
 
-    # 각 날짜별 점수순 정렬 → Top 10
+    # 각 날짜별 점수순 정렬 → Top 20
     daily_top = {}
     total_selected = 0
     for date in sorted(by_date.keys(), reverse=True):
         day_arts = by_date[date]
         day_arts.sort(key=lambda x: x['total_score'], reverse=True)
-        top10 = day_arts[:10]
-        daily_top[date] = top10
-        total_selected += len(top10)
+        top20 = day_arts[:20]
+        daily_top[date] = top20
+        total_selected += len(top20)
 
     print(f"날짜 수: {len(daily_top)}일")
-    print(f"Top 10 선별: {total_selected}건")
+    print(f"Top 20 선별: {total_selected}건")
 
     # 상위 5일 미리보기
     for date in sorted(daily_top.keys(), reverse=True)[:5]:
@@ -245,7 +245,7 @@ def generate_daily_html(daily_top, total_selected):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HBF Daily Top 10</title>
+<title>HBF Daily Top 20</title>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box; }}
   body {{
@@ -336,7 +336,7 @@ def generate_daily_html(daily_top, total_selected):
 <body>
 
 <div class="header">
-  <h1>HBF Daily Top 10</h1>
+  <h1>HBF Daily Top 20</h1>
   <div class="sub">HBF chip development & progress | International tech media | {now}</div>
   <div class="stats">
     <div class="stat"><div class="n">{total_selected}</div><div class="l">Selected</div></div>

@@ -1,5 +1,5 @@
 """
-Discord 웹훅으로 HBF Daily Top 10 전송
+Discord 웹훅으로 HBF Daily Top 20 전송
 - 본문 추출 성공한 기사만 순위 포함 (실패 시 차순위로 대체)
 - Playwright로 URL 변환 → newspaper4k 본문 추출 → 한국어 번역/요약
 - edge-tts로 요약 음성 생성 → Discord 음성 파일 전송
@@ -248,8 +248,8 @@ def main():
         a['total_score'] = calc_total(a)
     day_articles.sort(key=lambda x: x['total_score'], reverse=True)
 
-    # 넉넉하게 상위 30개 후보 (본문 실패 시 차순위 대체)
-    candidates = day_articles[:30]
+    # 넉넉하게 상위 50개 후보 (본문 실패 시 차순위 대체)
+    candidates = day_articles[:50]
 
     print(f"Date: {target_date} | {len(day_articles)}건 중 후보 {len(candidates)}개")
 
@@ -259,11 +259,11 @@ def main():
         if art['link'] in url_map:
             art['real_url'] = url_map[art['link']]
 
-    # ── Step 2: 본문 추출 성공한 기사만 Top 10 선별 ──
+    # ── Step 2: 본문 추출 성공한 기사만 Top 20 선별 ──
     top10 = []
     print("\n  본문 추출 중 (성공한 기사만 선별)...")
     for art in candidates:
-        if len(top10) >= 10:
+        if len(top10) >= 20:
             break
 
         real_url = art.get('real_url', art.get('link', ''))
@@ -327,7 +327,7 @@ def main():
 
     # 헤더
     header = {
-        'title': f':newspaper:  HBF Daily Top 10 — {target_date}',
+        'title': f':newspaper:  HBF Daily Top 20 — {target_date}',
         'description': (
             f':loud_sound: 음성 브리핑 포함\n'
             f'본문 요약 + 한국어 번역 | 전체 {len(day_articles)}건 중 상위 {len(top10)}개'
