@@ -9,6 +9,7 @@ Discord 웹훅으로 HBF Daily Top 20 전송
 import json
 import sys
 import io
+import os
 import time
 import asyncio
 import requests
@@ -28,7 +29,10 @@ ARTICLES_JSON = OUTPUT_DIR / "articles.json"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 AUDIO_DIR.mkdir(exist_ok=True)
 
-WEBHOOK_URL = "https://discordapp.com/api/webhooks/1481357268867092575/nyWsUK8gyZ9BdsWlsBq55xLCDtycaAU6xJ_9AhZYpi1OXZI_qUR9rZo5FkmGNVk34J3V"
+WEBHOOK_URL = os.environ.get(
+    "DISCORD_WEBHOOK_URL",
+    "https://discordapp.com/api/webhooks/1481357268867092575/nyWsUK8gyZ9BdsWlsBq55xLCDtycaAU6xJ_9AhZYpi1OXZI_qUR9rZo5FkmGNVk34J3V"
+)
 
 # edge-tts 한국어 음성
 TTS_VOICE = "ko-KR-SunHiNeural"  # 여성 / ko-KR-InJoonNeural = 남성
