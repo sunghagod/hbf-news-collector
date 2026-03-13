@@ -12,6 +12,7 @@ import io
 import os
 import time
 import asyncio
+import hashlib
 import requests
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,7 @@ import edge_tts
 
 OUTPUT_DIR = Path(__file__).parent
 ARTICLES_JSON = OUTPUT_DIR / "articles.json"
+SENT_HISTORY = OUTPUT_DIR / "sent_history.json"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 AUDIO_DIR.mkdir(exist_ok=True)
 
@@ -64,6 +66,29 @@ HBF_KEYWORDS = {
 DARIO_KEYWORDS = {'DARIO AMODEI': 5, 'DARIO': 3, 'ANTHROPIC': 2}
 
 translator = GoogleTranslator(source='en', target='ko')
+
+
+def load_sent_history():
+    """이미 발송한 기사 해시 목록 로드"""
+    if SENT_HISTORY.exists():
+        try:
+            with open(SENT_HISTORY, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return set()
+
+
+def save_sent_history(sent_set):
+    """발송한 기사 해시 목록 저장"""
+    with open(SENT_HISTORY, 'w', encoding='utf-8') as f:
+        json.dump(sorted(sent_set), f, ensure_ascii=False)
+
+
+def article_hash(art):
+    """기사 제목 기반 해시 (중복 판별용)"""
+    title = art.get('title', '').strip().lower()
+    return hashlib.md5(title.encode()).hexdigest()[:16]
 
 # ── 번역 시 원문 유지할 고유명사 ──
 PROPER_NOUNS = [
@@ -263,12 +288,22 @@ def main():
         if art['link'] in url_map:
             art['real_url'] = url_map[art['link']]
 
-    # ── Step 2: 본문 추출 성공한 기사만 Top 20 선별 ──
+    # ── Step 2: 중복 제거 + 본문 추출 성공한 기사만 Top 20 선별 ──
+    sent_history = load_sent_history()
+    print(f"\n  기존 발송 이력: {len(sent_history)}건")
+
     top10 = []
-    print("\n  본문 추출 중 (성공한 기사만 선별)...")
+    skipped_dup = 0
+    print("  본문 추출 중 (중복 제외, 성공한 기사만 선별)...")
     for art in candidates:
         if len(top10) >= 20:
             break
+
+        # 중복 체크
+        h = article_hash(art)
+        if h in sent_history:
+            skipped_dup += 1
+            continue
 
         real_url = art.get('real_url', art.get('link', ''))
         if 'news.google.com' in real_url:
@@ -291,26 +326,28 @@ def main():
         top10.append(art)
         print(f"    #{len(top10)} {art['title'][:50]}...")
 
+    print(f"  중복 스킵: {skipped_dup}건")
+
     print(f"\n  본문 추출 성공: {len(top10)}건")
 
     if not top10:
         print("본문 추출 가능한 기사 없음")
         return
 
-    # ── Step 3: TTS 음성 생성 ──
+    # ── Step 3: TTS 음성 생성 (존댓말) ──
     print("\n  음성 생성 중...")
     tts_lines = []
-    tts_lines.append(f"{target_date} HBF 뉴스 브리핑을 시작합니다.")
+    tts_lines.append(f"안녕하세요. {target_date} HBF 뉴스 브리핑을 시작하겠습니다.")
     tts_lines.append("")
 
     for i, art in enumerate(top10):
         rank = i + 1
-        tts_lines.append(f"{rank}번째 기사.")
+        tts_lines.append(f"{rank}번째 기사입니다.")
         tts_lines.append(art['title_ko'])
         tts_lines.append(art['summary_ko'])
         tts_lines.append("")
 
-    tts_lines.append("이상으로 오늘의 HBF 뉴스 브리핑을 마칩니다.")
+    tts_lines.append("이상으로 오늘의 HBF 뉴스 브리핑을 마치겠습니다. 감사합니다.")
 
     tts_text = '\n'.join(tts_lines)
     audio_path = AUDIO_DIR / f"hbf_briefing_{target_date}.mp3"
@@ -370,6 +407,12 @@ def main():
             ],
         }
         send_discord_embed([embed])
+
+    # ── Step 5: 발송 이력 저장 (중복 방지) ──
+    for art in top10:
+        sent_history.add(article_hash(art))
+    save_sent_history(sent_history)
+    print(f"  발송 이력 저장: 총 {len(sent_history)}건")
 
     print(f"\nDiscord 전송 완료! (Top {len(top10)}, 번역 + 요약 + 음성)")
 

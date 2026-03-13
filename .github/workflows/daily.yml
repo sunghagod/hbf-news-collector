@@ -34,3 +34,11 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python discord_send.py
+
+      - name: Save sent history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sent_history.json
+          git diff --cached --quiet || git commit -m "update sent history [skip ci]"
+          git push
