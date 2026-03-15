@@ -179,44 +179,92 @@ def translate_text(text):
         return text
 
 
-def resolve_urls_playwright(articles):
-    """Playwright로 Google News URL → 실제 URL 일괄 변환"""
-    resolved = {}
-    google_arts = [a for a in articles if 'news.google.com' in a.get('link', '')]
-    if not google_arts:
-        return resolved
+JS_EXTRACT_TEXT = """
+() => {
+    const selectors = [
+        'article', '[role="article"]', '.article-body', '.article-content',
+        '.story-body', '.post-content', '.entry-content', '.content-body',
+        '.caas-body', '.article__body', '.article-text', '.story-content',
+        '.post-body', '.field-body', 'main'
+    ];
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.innerText && el.innerText.trim().length > 100) {
+            return el.innerText.trim();
+        }
+    }
+    const paragraphs = document.querySelectorAll('p');
+    const texts = Array.from(paragraphs)
+        .map(p => p.innerText.trim())
+        .filter(t => t.length > 40);
+    if (texts.length >= 2) return texts.join('\\n');
+    return '';
+}
+"""
 
-    print(f"  Playwright: {len(google_arts)}개 URL 변환...")
+
+def resolve_and_extract_playwright(articles):
+    """Playwright로 URL 변환 + 본문 추출을 한 번에 처리"""
+    results = {}  # link -> {'real_url': ..., 'body': ...}
+
+    print(f"  Playwright: {len(articles)}개 기사 처리 (URL 변환 + 본문 추출)...")
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            for i, art in enumerate(google_arts):
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            )
+            page = context.new_page()
+
+            for i, art in enumerate(articles):
                 link = art['link']
                 try:
-                    page.goto(link, wait_until='domcontentloaded', timeout=12000)
-                    page.wait_for_timeout(2000)
-                    final = page.url
-                    if 'news.google.com' not in final:
-                        resolved[link] = final
-                except Exception:
-                    pass
+                    # Step 1: Google News → 실제 URL
+                    if 'news.google.com' in link:
+                        page.goto(link, wait_until='domcontentloaded', timeout=15000)
+                        page.wait_for_timeout(3000)
+                        real_url = page.url
+                        if 'news.google.com' in real_url:
+                            # consent 페이지 등 우회 시도
+                            page.wait_for_timeout(3000)
+                            real_url = page.url
+                        if 'news.google.com' in real_url:
+                            print(f"    [{i+1}] URL 변환 실패: {art['title'][:40]}...")
+                            continue
+                    else:
+                        real_url = link
+                        page.goto(real_url, wait_until='domcontentloaded', timeout=15000)
+                        page.wait_for_timeout(2000)
+
+                    # Step 2: 본문 추출
+                    body = page.evaluate(JS_EXTRACT_TEXT)
+
+                    if body and len(body) > 100:
+                        results[link] = {'real_url': real_url, 'body': body}
+                        print(f"    [{i+1}] OK ({len(body)}자): {art['title'][:40]}...")
+                    else:
+                        # Playwright 실패 시 newspaper4k 폴백
+                        try:
+                            article_obj = Article(real_url)
+                            article_obj.download()
+                            article_obj.parse()
+                            if article_obj.text and len(article_obj.text) > 50:
+                                results[link] = {'real_url': real_url, 'body': article_obj.text}
+                                print(f"    [{i+1}] OK-fallback ({len(article_obj.text)}자): {art['title'][:40]}...")
+                            else:
+                                print(f"    [{i+1}] 본문 없음: {art['title'][:40]}...")
+                        except Exception:
+                            print(f"    [{i+1}] 추출 실패: {art['title'][:40]}...")
+
+                except Exception as e:
+                    print(f"    [{i+1}] 에러: {art['title'][:40]}... ({e})")
+
             browser.close()
     except Exception as e:
         print(f"  Playwright error: {e}")
 
-    print(f"  변환 성공: {len(resolved)}/{len(google_arts)}")
-    return resolved
-
-
-def extract_article_text(url):
-    try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        return article.text if article.text and len(article.text) > 50 else None
-    except Exception:
-        return None
+    print(f"  추출 성공: {len(results)}/{len(articles)}")
+    return results
 
 
 def summarize_text(text, num_sentences=3):
@@ -260,6 +308,11 @@ def send_discord_audio(filepath, message=""):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--date', help='특정 날짜 지정 (YYYY-MM-DD)')
+    args = parser.parse_args()
+
     with open(ARTICLES_JSON, 'r', encoding='utf-8') as f:
         articles = json.load(f)
 
@@ -267,7 +320,12 @@ def main():
 
     today = datetime.now().strftime('%Y-%m-%d')
     dates = sorted(set(a['date'] for a in articles if a.get('date')), reverse=True)
-    target_date = today if today in dates else (dates[0] if dates else None)
+
+    if args.date:
+        target_date = args.date
+    else:
+        target_date = today if today in dates else (dates[0] if dates else None)
+
     if not target_date:
         print("기사 없음")
         return
@@ -277,41 +335,43 @@ def main():
         a['total_score'] = calc_total(a)
     day_articles.sort(key=lambda x: x['total_score'], reverse=True)
 
-    # 넉넉하게 상위 50개 후보 (본문 실패 시 차순위 대체)
-    candidates = day_articles[:50]
-
-    print(f"Date: {target_date} | {len(day_articles)}건 중 후보 {len(candidates)}개")
-
-    # ── Step 1: URL 변환 ──
-    url_map = resolve_urls_playwright(candidates)
-    for art in candidates:
-        if art['link'] in url_map:
-            art['real_url'] = url_map[art['link']]
-
-    # ── Step 2: 중복 제거 + 본문 추출 성공한 기사만 Top 20 선별 ──
+    # 중복 제거
     sent_history = load_sent_history()
-    print(f"\n  기존 발송 이력: {len(sent_history)}건")
+    print(f"  기존 발송 이력: {len(sent_history)}건")
 
-    top10 = []
+    # 이미 보낸 기사 제외
+    candidates = []
     skipped_dup = 0
-    print("  본문 추출 중 (중복 제외, 성공한 기사만 선별)...")
+    for a in day_articles:
+        h = article_hash(a)
+        if h in sent_history:
+            skipped_dup += 1
+        else:
+            candidates.append(a)
+        if len(candidates) >= 50:
+            break
+
+    print(f"Date: {target_date} | {len(day_articles)}건, 중복 {skipped_dup}건 제외, 후보 {len(candidates)}개")
+
+    if not candidates:
+        print("새로 보낼 기사 없음 (모두 기발송)")
+        return
+
+    # ── Step 1+2: Playwright로 URL 변환 + 본문 추출 한 번에 ──
+    extract_results = resolve_and_extract_playwright(candidates)
+
+    # ── 본문 추출 성공한 기사만 Top 20 선별 ──
+    top10 = []
     for art in candidates:
         if len(top10) >= 20:
             break
 
-        # 중복 체크
-        h = article_hash(art)
-        if h in sent_history:
-            skipped_dup += 1
+        result = extract_results.get(art['link'])
+        if not result:
             continue
 
-        real_url = art.get('real_url', art.get('link', ''))
-        if 'news.google.com' in real_url:
-            continue
-
-        body = extract_article_text(real_url)
-        if not body:
-            continue
+        body = result['body']
+        real_url = result['real_url']
 
         summary_en = summarize_text(body, num_sentences=3)
         title_ko = translate_text(art['title'])
@@ -324,11 +384,9 @@ def main():
         art['summary_ko'] = summary_ko[:400]
         art['real_url'] = real_url
         top10.append(art)
-        print(f"    #{len(top10)} {art['title'][:50]}...")
 
     print(f"  중복 스킵: {skipped_dup}건")
-
-    print(f"\n  본문 추출 성공: {len(top10)}건")
+    print(f"\n  최종 전송 대상: {len(top10)}건")
 
     if not top10:
         print("본문 추출 가능한 기사 없음")
