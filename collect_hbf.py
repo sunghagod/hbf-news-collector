@@ -19,6 +19,7 @@ import feedparser
 import requests
 from urllib.parse import quote_plus, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from googlenewsdecoder import new_decoderv1
 
 # ── 설정 ──────────────────────────────────────────────
 OUTPUT_DIR = Path(__file__).parent
@@ -297,25 +298,28 @@ def main():
     print(f"중복 제거: {len(unique)}건")
 
     # URL 추출 + 한국 언론 필터 (병렬 처리)
-    print(f"URL 추출 중... ({len(unique)}건, 병렬 20스레드)")
+    print(f"URL 디코딩 중... ({len(unique)}건, 병렬 5스레드)")
 
     def resolve_url(art):
         real_url = art['link']
-        try:
-            resp = requests.head(art['link'], headers=HEADERS, timeout=6, allow_redirects=True)
-            if resp.url:
-                real_url = resp.url
-        except Exception:
+        # googlenewsdecoder로 Google News URL 디코딩
+        if 'news.google.com' in real_url:
             try:
-                resp = requests.get(art['link'], headers=HEADERS, timeout=8, allow_redirects=True, stream=True)
-                real_url = resp.url
-                resp.close()
+                result = new_decoderv1(real_url, interval=1.0)
+                if result.get('status') and result.get('decoded_url'):
+                    real_url = result['decoded_url']
             except Exception:
-                pass
+                # 디코더 실패 시 requests 폴백
+                try:
+                    resp = requests.head(real_url, headers=HEADERS, timeout=6, allow_redirects=True)
+                    if resp.url and 'news.google.com' not in resp.url:
+                        real_url = resp.url
+                except Exception:
+                    pass
         art['real_url'] = real_url
         return art
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(resolve_url, art): art for art in unique}
         done_count = 0
         for future in as_completed(futures):

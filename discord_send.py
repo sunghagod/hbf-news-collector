@@ -24,6 +24,7 @@ from deep_translator import GoogleTranslator
 from newspaper import Article
 from playwright.sync_api import sync_playwright
 import edge_tts
+from googlenewsdecoder import new_decoderv1
 
 OUTPUT_DIR = Path(__file__).parent
 ARTICLES_JSON = OUTPUT_DIR / "articles.json"
@@ -204,10 +205,10 @@ JS_EXTRACT_TEXT = """
 
 
 def resolve_and_extract_playwright(articles):
-    """Playwright로 URL 변환 + 본문 추출을 한 번에 처리"""
+    """Playwright로 본문 추출 (URL은 articles.json의 real_url 우선 사용)"""
     results = {}  # link -> {'real_url': ..., 'body': ...}
 
-    print(f"  Playwright: {len(articles)}개 기사 처리 (URL 변환 + 본문 추출)...")
+    print(f"  Playwright: {len(articles)}개 기사 본문 추출...")
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -218,25 +219,33 @@ def resolve_and_extract_playwright(articles):
 
             for i, art in enumerate(articles):
                 link = art['link']
+                # collect_hbf.py가 이미 real_url을 추출해 둠 → 그걸 우선 사용
+                real_url = art.get('real_url', '')
                 try:
-                    # Step 1: Google News → 실제 URL
-                    if 'news.google.com' in link:
+                    # real_url이 없거나 여전히 google news면 디코더로 변환
+                    if not real_url or 'news.google.com' in real_url:
+                        try:
+                            dec = new_decoderv1(link, interval=0.5)
+                            if dec.get('status') and dec.get('decoded_url'):
+                                real_url = dec['decoded_url']
+                        except Exception:
+                            pass
+
+                    # 그래도 google news면 Playwright로 시도
+                    if not real_url or 'news.google.com' in real_url:
                         page.goto(link, wait_until='domcontentloaded', timeout=15000)
-                        page.wait_for_timeout(3000)
+                        page.wait_for_timeout(4000)
                         real_url = page.url
-                        if 'news.google.com' in real_url:
-                            # consent 페이지 등 우회 시도
-                            page.wait_for_timeout(3000)
-                            real_url = page.url
                         if 'news.google.com' in real_url:
                             print(f"    [{i+1}] URL 변환 실패: {art['title'][:40]}...")
                             continue
-                    else:
-                        real_url = link
+
+                    if real_url and 'news.google.com' not in real_url:
+                        # real_url이 있으면 바로 해당 URL로 이동
                         page.goto(real_url, wait_until='domcontentloaded', timeout=15000)
                         page.wait_for_timeout(2000)
 
-                    # Step 2: 본문 추출
+                    # 본문 추출
                     body = page.evaluate(JS_EXTRACT_TEXT)
 
                     if body and len(body) > 100:
