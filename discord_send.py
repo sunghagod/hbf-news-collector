@@ -24,7 +24,7 @@ from deep_translator import GoogleTranslator
 from newspaper import Article
 from playwright.sync_api import sync_playwright
 import edge_tts
-from googlenewsdecoder import new_decoderv1
+from googlenewsdecoder import gnewsdecoder
 
 OUTPUT_DIR = Path(__file__).parent
 ARTICLES_JSON = OUTPUT_DIR / "articles.json"
@@ -204,75 +204,94 @@ JS_EXTRACT_TEXT = """
 """
 
 
-def resolve_and_extract_playwright(articles):
-    """Playwright로 본문 추출 (URL은 articles.json의 real_url 우선 사용)"""
-    results = {}  # link -> {'real_url': ..., 'body': ...}
+def resolve_and_extract(articles):
+    """gnewsdecoder로 URL 디코딩 → newspaper4k/Playwright로 본문 추출"""
+    results = {}
 
-    print(f"  Playwright: {len(articles)}개 기사 본문 추출...")
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-            )
-            page = context.new_page()
+    print(f"  URL 디코딩 + 본문 추출 ({len(articles)}개)...")
 
-            for i, art in enumerate(articles):
-                link = art['link']
-                # collect_hbf.py가 이미 real_url을 추출해 둠 → 그걸 우선 사용
-                real_url = art.get('real_url', '')
-                try:
-                    # real_url이 없거나 여전히 google news면 디코더로 변환
-                    if not real_url or 'news.google.com' in real_url:
-                        try:
-                            dec = new_decoderv1(link, interval=0.5)
-                            if dec.get('status') and dec.get('decoded_url'):
-                                real_url = dec['decoded_url']
-                        except Exception:
-                            pass
+    # Step 1: gnewsdecoder로 URL 디코딩
+    decoded_urls = {}
+    decode_ok = 0
+    decode_fail = 0
+    for i, art in enumerate(articles):
+        link = art['link']
+        try:
+            result = gnewsdecoder(link, interval=2)
+            if result.get('status') and result.get('decoded_url'):
+                decoded_urls[link] = result['decoded_url']
+                decode_ok += 1
+            else:
+                decode_fail += 1
+        except Exception:
+            decode_fail += 1
 
-                    # 그래도 google news면 Playwright로 시도
-                    if not real_url or 'news.google.com' in real_url:
-                        page.goto(link, wait_until='domcontentloaded', timeout=15000)
-                        page.wait_for_timeout(4000)
-                        real_url = page.url
-                        if 'news.google.com' in real_url:
-                            print(f"    [{i+1}] URL 변환 실패: {art['title'][:40]}...")
-                            continue
+        if (i + 1) % 10 == 0:
+            print(f"    디코딩 [{i+1}/{len(articles)}] OK:{decode_ok} FAIL:{decode_fail}")
 
-                    if real_url and 'news.google.com' not in real_url:
-                        # real_url이 있으면 바로 해당 URL로 이동
-                        page.goto(real_url, wait_until='domcontentloaded', timeout=15000)
-                        page.wait_for_timeout(2000)
+    print(f"  URL 디코딩 완료: {decode_ok}/{len(articles)} 성공")
 
-                    # 본문 추출
-                    body = page.evaluate(JS_EXTRACT_TEXT)
+    if decode_ok == 0:
+        print("  [!] URL 디코딩 전부 실패 — Google 접속 차단 가능성 (다음 실행 시 복구)")
+        return results
 
-                    if body and len(body) > 100:
-                        results[link] = {'real_url': real_url, 'body': body}
-                        print(f"    [{i+1}] OK ({len(body)}자): {art['title'][:40]}...")
-                    else:
-                        # Playwright 실패 시 newspaper4k 폴백
-                        try:
-                            article_obj = Article(real_url)
-                            article_obj.download()
-                            article_obj.parse()
-                            if article_obj.text and len(article_obj.text) > 50:
-                                results[link] = {'real_url': real_url, 'body': article_obj.text}
-                                print(f"    [{i+1}] OK-fallback ({len(article_obj.text)}자): {art['title'][:40]}...")
-                            else:
-                                print(f"    [{i+1}] 본문 없음: {art['title'][:40]}...")
-                        except Exception:
-                            print(f"    [{i+1}] 추출 실패: {art['title'][:40]}...")
+    # Step 2: 본문 추출 (newspaper4k 우선, Playwright 폴백)
+    print(f"  본문 추출 중...")
+    pw_browser = None
+    pw_page = None
 
-                except Exception as e:
-                    print(f"    [{i+1}] 에러: {art['title'][:40]}... ({e})")
+    for i, art in enumerate(articles):
+        link = art['link']
+        real_url = decoded_urls.get(link)
+        if not real_url:
+            continue
 
-            browser.close()
-    except Exception as e:
-        print(f"  Playwright error: {e}")
+        title = art.get('title', '')
+        body = None
 
-    print(f"  추출 성공: {len(results)}/{len(articles)}")
+        # 2a: newspaper4k
+        try:
+            article_obj = Article(real_url)
+            article_obj.download()
+            article_obj.parse()
+            if article_obj.text and len(article_obj.text) > 100:
+                body = article_obj.text
+        except Exception:
+            pass
+
+        # 2b: Playwright 폴백
+        if not body:
+            try:
+                if pw_browser is None:
+                    from playwright.sync_api import sync_playwright
+                    pw = sync_playwright().start()
+                    pw_browser = pw.chromium.launch(headless=True)
+                    pw_ctx = pw_browser.new_context(
+                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+                    )
+                    pw_page = pw_ctx.new_page()
+
+                pw_page.goto(real_url, wait_until='domcontentloaded', timeout=15000)
+                pw_page.wait_for_timeout(2000)
+                body = pw_page.evaluate(JS_EXTRACT_TEXT)
+                if body and len(body) < 100:
+                    body = None
+            except Exception:
+                pass
+
+        if body:
+            results[link] = {'real_url': real_url, 'body': body}
+            print(f"    [{len(results)}] OK ({len(body)}자): {title[:45]}...")
+        else:
+            print(f"    [-] 본문 없음: {title[:45]}...")
+
+    if pw_browser:
+        try:
+            pw_browser.close()
+        except Exception:
+            pass
+
+    print(f"  추출 성공: {len(results)}/{decode_ok} (디코딩 성공 기사 중)")
     return results
 
 
@@ -326,6 +345,7 @@ def main():
         articles = json.load(f)
 
     articles = [a for a in articles if not is_korean(a)]
+    articles = [a for a in articles if a.get('tier', 4) <= 3]
 
     today = datetime.now().strftime('%Y-%m-%d')
     dates = sorted(set(a['date'] for a in articles if a.get('date')), reverse=True)
@@ -367,7 +387,7 @@ def main():
         return
 
     # ── Step 1+2: Playwright로 URL 변환 + 본문 추출 한 번에 ──
-    extract_results = resolve_and_extract_playwright(candidates)
+    extract_results = resolve_and_extract(candidates)
 
     # ── 본문 추출 성공한 기사만 Top 20 선별 ──
     top10 = []

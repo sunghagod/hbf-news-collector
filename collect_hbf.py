@@ -90,27 +90,27 @@ SEARCH_QUERIES = [
     ('Dario Amodei interview', 'en', 'dario'),
 ]
 
-# ── 매체 신뢰도 (해외 기술 매체만) ──
+# ── 매체 신뢰도 (Tier 4 미등록 매체는 Discord/보고서에서 제외) ──
 TRUSTED_SOURCES = {
-    # Tier 1: 글로벌 주요 비즈니스/금융
-    'reuters.com': 1, 'bloomberg.com': 1, 'wsj.com': 1,
-    'ft.com': 1, 'nytimes.com': 1, 'economist.com': 1,
-    # Tier 2: 기술/반도체 전문
-    'semiwiki.com': 2, 'semianalysis.com': 2, 'techinsights.com': 2,
-    'anandtech.com': 2, 'tomshardware.com': 2, 'eetimes.com': 2,
-    'techcrunch.com': 2, 'theverge.com': 2, 'arstechnica.com': 2,
-    'wired.com': 2, 'ieee.org': 2, 'trendforce.com': 2,
-    'digitimes.com': 2, 'blocksandfiles.com': 2, 'techpowerup.com': 2,
-    'skhynix.com': 2, 'news.samsung.com': 2, 'semiconductor-today.com': 2,
-    'eenewseurope.com': 2, 'eejournal.com': 2, 'nextplatform.com': 2,
-    'hpcwire.com': 2, 'servethehome.com': 2,
-    # Tier 3: 비즈니스/금융/일반 기술
-    'cnbc.com': 3, 'bbc.com': 3, 'apnews.com': 3,
-    'yahoo.com': 3, 'finance.yahoo.com': 3,
-    'seekingalpha.com': 3, 'simplywall.st': 3,
-    'barrons.com': 3, 'investopedia.com': 3,
-    'zdnet.com': 3, 'cnet.com': 3, 'engadget.com': 3,
-    'pcworld.com': 3, 'windowscentral.com': 3,
+    # Tier 1: 핵심 — 이것만 봐도 섹터 동향 파악
+    'bloomberg.com': 1, 'reuters.com': 1,
+    'yahoo.com': 1, 'finance.yahoo.com': 1,
+    'digitimes.com': 1, 'trendforce.com': 1,
+    'wsj.com': 1, 'ft.com': 1,
+    # Tier 2: 반도체/기술 전문
+    'semianalysis.com': 2, 'semiwiki.com': 2, 'techinsights.com': 2,
+    'eetimes.com': 2, 'tomshardware.com': 2, 'anandtech.com': 2,
+    'nextplatform.com': 2, 'hpcwire.com': 2, 'servethehome.com': 2,
+    'skhynix.com': 2, 'news.samsung.com': 2,
+    'blocksandfiles.com': 2, 'techpowerup.com': 2,
+    'semiconductor-today.com': 2, 'eejournal.com': 2,
+    # Tier 3: 보조 비즈니스/기술
+    'cnbc.com': 3, 'nytimes.com': 3, 'economist.com': 3,
+    'seekingalpha.com': 3, 'barrons.com': 3,
+    'techcrunch.com': 3, 'theverge.com': 3, 'arstechnica.com': 3,
+    'wired.com': 3, 'ieee.org': 3,
+    'zdnet.com': 3, 'cnet.com': 3,
+    'apnews.com': 3, 'bbc.com': 3,
 }
 
 SOURCE_NAME_MAP = {
@@ -190,6 +190,23 @@ def get_source_name(url):
     return domain.split('.')[0].capitalize() if domain else 'Unknown'
 
 
+import re
+
+NOISE_PATTERNS = re.compile(
+    r'black friday|cyber monday|shopping editor|stocking up on|'
+    r'gift guide|gifts? for (him|her|dad|mom|kids|men|women)|'
+    r'birthday gift|valentine.{0,5} gift|christmas gift|holiday gift|'
+    r'coupon code|promo code|discount code|'
+    r'\bbest .{0,15} to buy\b|'
+    r'\bgifts? under \$',
+    re.IGNORECASE
+)
+
+
+def is_noise_article(title):
+    return bool(NOISE_PATTERNS.search(title))
+
+
 def contains_hbf(text):
     upper = text.upper()
     return 'HBF' in upper or 'HIGH BANDWIDTH FLASH' in upper
@@ -245,10 +262,17 @@ def fetch_google_news_rss(query, lang='en', category='hbf'):
                 if filter_fn and not filter_fn(combined):
                     continue
 
+                if is_noise_article(title):
+                    continue
+
                 source_name = ''
-                if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
-                    source_name = entry.source.title
-                elif ' - ' in title:
+                source_href = ''
+                if hasattr(entry, 'source'):
+                    if hasattr(entry.source, 'title'):
+                        source_name = entry.source.title
+                    if hasattr(entry.source, 'href'):
+                        source_href = entry.source.href
+                if not source_name and ' - ' in title:
                     source_name = title.rsplit(' - ', 1)[-1].strip()
                     title = title.rsplit(' - ', 1)[0].strip()
 
@@ -257,6 +281,7 @@ def fetch_google_news_rss(query, lang='en', category='hbf'):
                     'link': link,
                     'date': pub_date.strftime('%Y-%m-%d') if pub_date else '',
                     'source_name': source_name,
+                    'source_href': source_href,
                     'query': query,
                     'lang': lang,
                     'category': category,
@@ -297,46 +322,20 @@ def main():
             unique.append(art)
     print(f"중복 제거: {len(unique)}건")
 
-    # URL 추출 + 한국 언론 필터 (병렬 처리)
-    print(f"URL 디코딩 중... ({len(unique)}건, 병렬 5스레드)")
-
-    def resolve_url(art):
-        real_url = art['link']
-        # googlenewsdecoder로 Google News URL 디코딩
-        if 'news.google.com' in real_url:
-            try:
-                result = new_decoderv1(real_url, interval=1.0)
-                if result.get('status') and result.get('decoded_url'):
-                    real_url = result['decoded_url']
-            except Exception:
-                # 디코더 실패 시 requests 폴백
-                try:
-                    resp = requests.head(real_url, headers=HEADERS, timeout=6, allow_redirects=True)
-                    if resp.url and 'news.google.com' not in resp.url:
-                        real_url = resp.url
-                except Exception:
-                    pass
-        art['real_url'] = real_url
-        return art
-
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {executor.submit(resolve_url, art): art for art in unique}
-        done_count = 0
-        for future in as_completed(futures):
-            done_count += 1
-            if done_count % 50 == 0 or done_count == len(unique):
-                print(f"  [{done_count}/{len(unique)}]...")
+    # source_href 기반 필터링 (HTTP 요청 없이 빠르게 처리)
+    print(f"출처 필터링 중... ({len(unique)}건)")
 
     enriched = []
     blocked = 0
     for art in unique:
-        real_url = art.get('real_url', art['link'])
-        if is_korean_source(real_url):
+        source_href = art.get('source_href', '')
+        if source_href and is_korean_source(source_href):
             blocked += 1
             continue
-        art['tier'] = get_source_tier(real_url)
-        if not art['source_name']:
-            art['source_name'] = get_source_name(real_url)
+        art['real_url'] = art['link']
+        art['tier'] = get_source_tier(source_href) if source_href else 4
+        if not art['source_name'] and source_href:
+            art['source_name'] = get_source_name(source_href)
         enriched.append(art)
 
     enriched.sort(key=lambda x: (

@@ -17,9 +17,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import feedparser
-import requests
 from urllib.parse import quote_plus, urlparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── 설정 ──────────────────────────────────────────────
 OUTPUT_DIR = Path(__file__).parent
@@ -93,31 +91,30 @@ SEARCH_QUERIES = [
     ('battery gigafactory', 'en', 'battery'),
 ]
 
-# ── 매체 신뢰도 ──
+# ── 매체 신뢰도 (Tier 4 미등록 매체는 Discord/보고서에서 제외) ──
 TRUSTED_SOURCES = {
-    # Tier 1: 글로벌 주요 비즈니스/금융
-    'reuters.com': 1, 'bloomberg.com': 1, 'wsj.com': 1,
-    'ft.com': 1, 'nytimes.com': 1, 'economist.com': 1,
-    # Tier 2: 에너지/기술 전문
-    'iea.org': 2, 'irena.org': 2, 'energy.gov': 2,
+    # Tier 1: 핵심 — 에너지 시장 동향 + 지정학
+    'bloomberg.com': 1, 'reuters.com': 1,
+    'yahoo.com': 1, 'finance.yahoo.com': 1,
+    'wsj.com': 1, 'ft.com': 1,
+    'spglobal.com': 1, 'woodmac.com': 1,
+    'iea.org': 1, 'irena.org': 1,
+    # Tier 2: 에너지/원자재 전문
     'utilitydive.com': 2, 'energymonitor.ai': 2,
-    'renewableenergyworld.com': 2, 'pv-magazine.com': 2,
-    'pv-tech.org': 2, 'solarpowerworldonline.com': 2,
+    'pv-magazine.com': 2, 'pv-tech.org': 2,
     'windpowermonthly.com': 2, 'rechargenews.com': 2,
     'hydrogeninsight.com': 2, 'h2-view.com': 2,
     'world-nuclear-news.org': 2, 'ans.org': 2,
-    'energy-storage.news': 2, 'batterytechonline.com': 2,
-    'greentechmedia.com': 2, 'cleanenergywire.org': 2,
-    'carbonbrief.org': 2, 'electrek.co': 2,
+    'energy-storage.news': 2, 'electrek.co': 2,
     'canarymedia.com': 2, 'energyvoice.com': 2,
-    'spglobal.com': 2, 'woodmac.com': 2,
-    'techcrunch.com': 2, 'arstechnica.com': 2,
-    # Tier 3: 비즈니스/금융/일반
-    'cnbc.com': 3, 'bbc.com': 3, 'apnews.com': 3,
-    'yahoo.com': 3, 'finance.yahoo.com': 3,
+    'cleanenergywire.org': 2, 'carbonbrief.org': 2,
+    'oilprice.com': 2, 'rigzone.com': 2,
+    'energy.gov': 2, 'greentechmedia.com': 2,
+    # Tier 3: 보조 비즈니스/기술
+    'cnbc.com': 3, 'nytimes.com': 3, 'economist.com': 3,
     'seekingalpha.com': 3, 'barrons.com': 3,
-    'theverge.com': 3, 'wired.com': 3,
-    'zdnet.com': 3, 'cnet.com': 3,
+    'bbc.com': 3, 'apnews.com': 3,
+    'arstechnica.com': 3, 'techcrunch.com': 3,
 }
 
 SOURCE_NAME_MAP = {
@@ -146,10 +143,6 @@ SOURCE_NAME_MAP = {
     'theverge.com': 'The Verge', 'wired.com': 'Wired',
     'seekingalpha.com': 'Seeking Alpha',
     'barrons.com': "Barron's", 'bbc.com': 'BBC',
-}
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 }
 
 # ── 카테고리 설정 ──
@@ -198,6 +191,25 @@ def get_source_name(url):
         if d in domain:
             return name
     return domain.split('.')[0].capitalize() if domain else 'Unknown'
+
+
+import re
+
+# ── 쇼핑/선물(gift)/소비자 기사 필터 ──
+NOISE_PATTERNS = re.compile(
+    r'black friday|cyber monday|shopping editor|stocking up on|'
+    r'gift guide|gifts? for (him|her|dad|mom|kids|men|women)|'
+    r'birthday gift|valentine.{0,5} gift|christmas gift|holiday gift|'
+    r'coupon code|promo code|discount code|'
+    r'\bbest .{0,15} to buy\b|'
+    r'\bgifts? under \$',
+    re.IGNORECASE
+)
+
+
+def is_noise_article(title):
+    """쇼핑/선물(present) 등 에너지와 무관한 소비자 기사 필터"""
+    return bool(NOISE_PATTERNS.search(title))
 
 
 def contains_renewable(text):
@@ -265,10 +277,17 @@ def fetch_google_news_rss(query, lang='en', category='renewable'):
                 if filter_fn and not filter_fn(combined):
                     continue
 
+                if is_noise_article(title):
+                    continue
+
                 source_name = ''
-                if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
-                    source_name = entry.source.title
-                elif ' - ' in title:
+                source_href = ''
+                if hasattr(entry, 'source'):
+                    if hasattr(entry.source, 'title'):
+                        source_name = entry.source.title
+                    if hasattr(entry.source, 'href'):
+                        source_href = entry.source.href
+                if not source_name and ' - ' in title:
                     source_name = title.rsplit(' - ', 1)[-1].strip()
                     title = title.rsplit(' - ', 1)[0].strip()
 
@@ -277,6 +296,7 @@ def fetch_google_news_rss(query, lang='en', category='renewable'):
                     'link': link,
                     'date': pub_date.strftime('%Y-%m-%d') if pub_date else '',
                     'source_name': source_name,
+                    'source_href': source_href,
                     'query': query,
                     'lang': lang,
                     'category': category,
@@ -318,43 +338,20 @@ def main():
             unique.append(art)
     print(f"중복 제거: {len(unique)}건")
 
-    # URL 추출 + 한국 언론 필터
-    print(f"URL 추출 중... ({len(unique)}건, 병렬 20스레드)")
-
-    def resolve_url(art):
-        real_url = art['link']
-        try:
-            resp = requests.head(art['link'], headers=HEADERS, timeout=6, allow_redirects=True)
-            if resp.url:
-                real_url = resp.url
-        except Exception:
-            try:
-                resp = requests.get(art['link'], headers=HEADERS, timeout=8, allow_redirects=True, stream=True)
-                real_url = resp.url
-                resp.close()
-            except Exception:
-                pass
-        art['real_url'] = real_url
-        return art
-
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(resolve_url, art): art for art in unique}
-        done_count = 0
-        for future in as_completed(futures):
-            done_count += 1
-            if done_count % 50 == 0 or done_count == len(unique):
-                print(f"  [{done_count}/{len(unique)}]...")
+    # source_href 기반 필터링 (HTTP 요청 없이 빠르게 처리)
+    print(f"출처 필터링 중... ({len(unique)}건)")
 
     enriched = []
     blocked = 0
     for art in unique:
-        real_url = art.get('real_url', art['link'])
-        if is_korean_source(real_url):
+        source_href = art.get('source_href', '')
+        if source_href and is_korean_source(source_href):
             blocked += 1
             continue
-        art['tier'] = get_source_tier(real_url)
-        if not art['source_name']:
-            art['source_name'] = get_source_name(real_url)
+        art['real_url'] = art['link']
+        art['tier'] = get_source_tier(source_href) if source_href else 4
+        if not art['source_name'] and source_href:
+            art['source_name'] = get_source_name(source_href)
         enriched.append(art)
 
     enriched.sort(key=lambda x: (

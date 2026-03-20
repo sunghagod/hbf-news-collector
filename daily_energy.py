@@ -93,6 +93,8 @@ def main():
 
     articles = [a for a in articles if not is_korean(a)]
     print(f"한국 매체 제외 후: {len(articles)}건")
+    articles = [a for a in articles if a.get('tier', 4) <= 3]
+    print(f"Tier 1~3만 필터: {len(articles)}건")
 
     for art in articles:
         rel_score = calc_relevance_score(art['title'])

@@ -127,9 +127,11 @@ def main():
 
     print(f"원본: {len(articles)}건")
 
-    # 1. 한국 매체 제외
+    # 1. 한국 매체 제외 + Tier 4(미등록 매체) 제외
     articles = [a for a in articles if not is_korean(a)]
     print(f"한국 매체 제외 후: {len(articles)}건")
+    articles = [a for a in articles if a.get('tier', 4) <= 3]
+    print(f"Tier 1~3만 필터: {len(articles)}건")
 
     # 2. 점수 계산
     for art in articles:

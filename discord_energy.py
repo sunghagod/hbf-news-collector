@@ -1,9 +1,8 @@
 """
 Discord 웹훅으로 Energy Daily Top 20 전송
-- 본문 추출 성공한 기사만 순위 포함 (실패 시 차순위로 대체)
-- Playwright로 URL 변환 → newspaper4k 본문 추출 → 한국어 번역/요약
-- edge-tts로 요약 음성 생성 → Discord 음성 파일 전송
-- 전부 무료
+- 선물 시세 (WTI, 브렌트유, 천연가스, 우라늄) 포함
+- gnewsdecoder URL 디코딩 → 본문 추출 → 한국어 번역/요약
+- edge-tts 음성 브리핑 → Discord 전송
 """
 
 import json
@@ -24,6 +23,7 @@ from deep_translator import GoogleTranslator
 from newspaper import Article
 from playwright.sync_api import sync_playwright
 import edge_tts
+from googlenewsdecoder import gnewsdecoder
 
 OUTPUT_DIR = Path(__file__).parent
 ARTICLES_JSON = OUTPUT_DIR / "articles_energy.json"
@@ -98,6 +98,73 @@ PROPER_NOUNS = [
 
 translator = GoogleTranslator(source='en', target='ko')
 
+# ── 에너지 선물 시세 ──
+FUTURES_TICKERS = {
+    'CL=F':  {'name': 'WTI 원유',    'emoji': ':oil_drum:'},
+    'BZ=F':  {'name': '브렌트유',     'emoji': ':oil_drum:'},
+    'NG=F':  {'name': '천연가스',     'emoji': ':fire:'},
+    'URA':   {'name': '우라늄(URA)',  'emoji': ':radioactive:'},
+    'TAN':   {'name': '태양광(TAN)',  'emoji': ':sunny:'},
+    'ICLN':  {'name': '클린에너지(ICLN)', 'emoji': ':leaf:'},
+}
+
+
+def fetch_futures_prices():
+    """yfinance로 에너지 선물/ETF 시세 조회"""
+    try:
+        import yfinance as yf
+    except ImportError:
+        print("  [!] yfinance 미설치")
+        return []
+
+    results = []
+    for sym, info in FUTURES_TICKERS.items():
+        try:
+            t = yf.Ticker(sym)
+            hist = t.history(period='5d')
+            if hist.empty or len(hist) < 2:
+                continue
+            price = hist.iloc[-1]['Close']
+            prev = hist.iloc[-2]['Close']
+            chg_pct = ((price - prev) / prev) * 100
+            # 5일 전 대비
+            price_5d = hist.iloc[0]['Close']
+            chg_5d = ((price - price_5d) / price_5d) * 100
+            results.append({
+                'symbol': sym,
+                'name': info['name'],
+                'emoji': info['emoji'],
+                'price': price,
+                'chg_pct': chg_pct,
+                'chg_5d': chg_5d,
+            })
+        except Exception as e:
+            print(f"  [!] {sym} 조회 실패: {e}")
+    return results
+
+
+def format_futures_embed(futures_data, target_date):
+    """선물 시세를 Discord embed로 포맷"""
+    if not futures_data:
+        return None
+
+    lines = []
+    for f in futures_data:
+        arrow = ':chart_with_upwards_trend:' if f['chg_pct'] >= 0 else ':chart_with_downwards_trend:'
+        sign = '+' if f['chg_pct'] >= 0 else ''
+        sign5 = '+' if f['chg_5d'] >= 0 else ''
+        lines.append(
+            f"{f['emoji']} **{f['name']}**  `${f['price']:.2f}`  "
+            f"{arrow} {sign}{f['chg_pct']:.1f}% (5일 {sign5}{f['chg_5d']:.1f}%)"
+        )
+
+    return {
+        'title': f':chart_with_upwards_trend:  에너지 선물 시세 — {target_date}',
+        'description': '\n'.join(lines),
+        'color': 0xf39c12,
+        'footer': {'text': 'Yahoo Finance | 전일 종가 기준'},
+    }
+
 
 def load_sent_history():
     if SENT_HISTORY.exists():
@@ -165,43 +232,119 @@ def translate_text(text):
         return text
 
 
-def resolve_urls_playwright(articles):
-    resolved = {}
-    google_arts = [a for a in articles if 'news.google.com' in a.get('link', '')]
-    if not google_arts:
-        return resolved
-
-    print(f"  Playwright: {len(google_arts)}개 URL 변환...")
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            for art in google_arts:
-                link = art['link']
-                try:
-                    page.goto(link, wait_until='domcontentloaded', timeout=12000)
-                    page.wait_for_timeout(2000)
-                    final = page.url
-                    if 'news.google.com' not in final:
-                        resolved[link] = final
-                except Exception:
-                    pass
-            browser.close()
-    except Exception as e:
-        print(f"  Playwright error: {e}")
-
-    print(f"  변환 성공: {len(resolved)}/{len(google_arts)}")
-    return resolved
+JS_EXTRACT_TEXT = """
+() => {
+    const selectors = [
+        'article', '[role="article"]', '.article-body', '.article-content',
+        '.story-body', '.post-content', '.entry-content', '.content-body',
+        '.caas-body', '.article__body', '.article-text', '.story-content',
+        '.post-body', '.field-body', 'main'
+    ];
+    for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.innerText && el.innerText.trim().length > 100) {
+            return el.innerText.trim();
+        }
+    }
+    const paragraphs = document.querySelectorAll('p');
+    const texts = Array.from(paragraphs)
+        .map(p => p.innerText.trim())
+        .filter(t => t.length > 40);
+    if (texts.length >= 2) return texts.join('\\n');
+    return '';
+}
+"""
 
 
-def extract_article_text(url):
-    try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        return article.text if article.text and len(article.text) > 50 else None
-    except Exception:
-        return None
+def resolve_and_extract(articles):
+    """gnewsdecoder로 URL 디코딩 → newspaper4k/Playwright로 본문 추출"""
+    results = {}
+
+    print(f"  URL 디코딩 + 본문 추출 ({len(articles)}개)...")
+
+    # Step 1: gnewsdecoder로 URL 디코딩 (Google batchexecute API 사용)
+    decoded_urls = {}
+    decode_ok = 0
+    decode_fail = 0
+    for i, art in enumerate(articles):
+        link = art['link']
+        try:
+            result = gnewsdecoder(link, interval=2)
+            if result.get('status') and result.get('decoded_url'):
+                decoded_urls[link] = result['decoded_url']
+                decode_ok += 1
+            else:
+                decode_fail += 1
+        except Exception:
+            decode_fail += 1
+
+        if (i + 1) % 10 == 0:
+            print(f"    디코딩 [{i+1}/{len(articles)}] OK:{decode_ok} FAIL:{decode_fail}")
+
+    print(f"  URL 디코딩 완료: {decode_ok}/{len(articles)} 성공")
+
+    if decode_ok == 0:
+        print("  [!] URL 디코딩 전부 실패 — Google 접속 차단 가능성 (다음 실행 시 복구)")
+        return results
+
+    # Step 2: 본문 추출 (newspaper4k 우선, Playwright 폴백)
+    print(f"  본문 추출 중...")
+    pw_browser = None
+    pw_page = None
+
+    for i, art in enumerate(articles):
+        link = art['link']
+        real_url = decoded_urls.get(link)
+        if not real_url:
+            continue
+
+        title = art.get('title', '')
+        body = None
+
+        # 2a: newspaper4k (빠르고 가벼움)
+        try:
+            article_obj = Article(real_url)
+            article_obj.download()
+            article_obj.parse()
+            if article_obj.text and len(article_obj.text) > 100:
+                body = article_obj.text
+        except Exception:
+            pass
+
+        # 2b: Playwright 폴백 (newspaper 실패 시)
+        if not body:
+            try:
+                if pw_browser is None:
+                    from playwright.sync_api import sync_playwright
+                    pw = sync_playwright().start()
+                    pw_browser = pw.chromium.launch(headless=True)
+                    pw_ctx = pw_browser.new_context(
+                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+                    )
+                    pw_page = pw_ctx.new_page()
+
+                pw_page.goto(real_url, wait_until='domcontentloaded', timeout=15000)
+                pw_page.wait_for_timeout(2000)
+                body = pw_page.evaluate(JS_EXTRACT_TEXT)
+                if body and len(body) < 100:
+                    body = None
+            except Exception:
+                pass
+
+        if body:
+            results[link] = {'real_url': real_url, 'body': body}
+            print(f"    [{len(results)}] OK ({len(body)}자): {title[:45]}...")
+        else:
+            print(f"    [-] 본문 없음: {title[:45]}...")
+
+    if pw_browser:
+        try:
+            pw_browser.close()
+        except Exception:
+            pass
+
+    print(f"  추출 성공: {len(results)}/{decode_ok} (디코딩 성공 기사 중)")
+    return results
 
 
 def summarize_text(text, num_sentences=3):
@@ -255,6 +398,7 @@ def main():
         articles = json.load(f)
 
     articles = [a for a in articles if not is_korean(a)]
+    articles = [a for a in articles if a.get('tier', 4) <= 3]
 
     today = datetime.now().strftime('%Y-%m-%d')
     dates = sorted(set(a['date'] for a in articles if a.get('date')), reverse=True)
@@ -268,39 +412,42 @@ def main():
         a['total_score'] = calc_total(a)
     day_articles.sort(key=lambda x: x['total_score'], reverse=True)
 
-    candidates = day_articles[:50]
-
-    print(f"Date: {target_date} | {len(day_articles)}건 중 후보 {len(candidates)}개")
-
-    # ── Step 1: URL 변환 ──
-    url_map = resolve_urls_playwright(candidates)
-    for art in candidates:
-        if art['link'] in url_map:
-            art['real_url'] = url_map[art['link']]
-
-    # ── Step 2: 중복 제거 + 본문 추출 성공한 기사만 Top 20 선별 ──
+    # 중복 제거
     sent_history = load_sent_history()
-    print(f"\n  기존 발송 이력: {len(sent_history)}건")
+    print(f"  기존 발송 이력: {len(sent_history)}건")
 
-    top10 = []
+    candidates = []
     skipped_dup = 0
-    print("  본문 추출 중 (중복 제외, 성공한 기사만 선별)...")
+    for a in day_articles:
+        h = article_hash(a)
+        if h in sent_history:
+            skipped_dup += 1
+        else:
+            candidates.append(a)
+        if len(candidates) >= 50:
+            break
+
+    print(f"Date: {target_date} | {len(day_articles)}건, 중복 {skipped_dup}건 제외, 후보 {len(candidates)}개")
+
+    if not candidates:
+        print("새로 보낼 기사 없음 (모두 기발송)")
+        return
+
+    # ── Step 1+2: URL 디코딩 + 본문 추출 ──
+    extract_results = resolve_and_extract(candidates)
+
+    # ── 본문 추출 성공한 기사만 Top 20 선별 ──
+    top10 = []
     for art in candidates:
         if len(top10) >= 20:
             break
 
-        h = article_hash(art)
-        if h in sent_history:
-            skipped_dup += 1
+        result = extract_results.get(art['link'])
+        if not result:
             continue
 
-        real_url = art.get('real_url', art.get('link', ''))
-        if 'news.google.com' in real_url:
-            continue
-
-        body = extract_article_text(real_url)
-        if not body:
-            continue
+        body = result['body']
+        real_url = result['real_url']
 
         summary_en = summarize_text(body, num_sentences=3)
         title_ko = translate_text(art['title'])
@@ -313,20 +460,33 @@ def main():
         art['summary_ko'] = summary_ko[:400]
         art['real_url'] = real_url
         top10.append(art)
-        print(f"    #{len(top10)} {art['title'][:50]}...")
 
     print(f"  중복 스킵: {skipped_dup}건")
-    print(f"\n  본문 추출 성공: {len(top10)}건")
+    print(f"\n  최종 전송 대상: {len(top10)}건")
 
     if not top10:
         print("본문 추출 가능한 기사 없음")
         return
+
+    # ── Step 2.5: 선물 시세 조회 ──
+    print("\n  선물 시세 조회 중...")
+    futures_data = fetch_futures_prices()
+    if futures_data:
+        print(f"  선물 시세: {len(futures_data)}개 조회 완료")
 
     # ── Step 3: TTS 음성 생성 ──
     print("\n  음성 생성 중...")
     tts_lines = []
     tts_lines.append(f"안녕하세요. {target_date} 에너지 뉴스 브리핑을 시작하겠습니다.")
     tts_lines.append("")
+
+    # 선물 시세 음성
+    if futures_data:
+        tts_lines.append("먼저 에너지 선물 시세입니다.")
+        for f in futures_data:
+            direction = "상승" if f['chg_pct'] >= 0 else "하락"
+            tts_lines.append(f"{f['name']} {f['price']:.2f}달러, 전일 대비 {abs(f['chg_pct']):.1f}퍼센트 {direction}.")
+        tts_lines.append("")
 
     for i, art in enumerate(top10):
         rank = i + 1
@@ -349,6 +509,13 @@ def main():
         tts_ok = False
 
     # ── Step 4: Discord 전송 ──
+
+    # 선물 시세 먼저 전송
+    futures_embed = format_futures_embed(futures_data, target_date)
+    if futures_embed:
+        send_discord_embed([futures_embed])
+        print(f"  선물 시세 전송 완료")
+
     cat_colors = {
         'renewable': 0x66bb6a, 'hydrogen': 0x29b6f6,
         'nuclear': 0xffa726, 'battery': 0xab47bc,
@@ -364,7 +531,7 @@ def main():
         'title': f':zap:  Energy Daily Top 20 — {target_date}',
         'description': (
             f':loud_sound: 음성 브리핑 포함\n'
-            f'본문 요약 + 한국어 번역 | 전체 {len(day_articles)}건 중 상위 {len(top10)}개'
+            f'Tier 1~3 매체만 | 전체 {len(day_articles)}건 중 상위 {len(top10)}개'
         ),
         'color': 0x66bb6a,
     }
