@@ -83,7 +83,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp sent_history_energy.json /tmp/sent_history_energy.json
+          git checkout -- .
           git pull --rebase origin main
+          cp /tmp/sent_history_energy.json sent_history_energy.json
           git add sent_history_energy.json
           git diff --cached --quiet || git commit -m "update energy sent history [skip ci]"
           git push
