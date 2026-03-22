@@ -1,7 +1,11 @@
 audio/
 articles.json
+articles_energy.json
 report.html
 report_daily.html
+report_energy.html
+report_energy_daily.html
 auto_collect.log
+energy_log.txt
 __pycache__/
 *.pyc

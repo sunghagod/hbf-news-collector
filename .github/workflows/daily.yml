@@ -1,4 +1,4 @@
-name: HBF Daily News
+name: Daily News
 
 on:
   schedule:
@@ -10,7 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  collect-and-send:
+  hbf:
+    name: HBF Pipeline
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -44,4 +45,45 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add sent_history.json
           git diff --cached --quiet || git commit -m "update sent history [skip ci]"
+          git push
+
+  energy:
+    name: Energy Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: hbf
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Collect articles
+        run: python collect_energy.py
+
+      - name: Generate daily report
+        run: python daily_energy.py
+
+      - name: Send to Discord
+        env:
+          DISCORD_ENERGY_WEBHOOK_URL: ${{ secrets.DISCORD_ENERGY_WEBHOOK_URL }}
+        run: python discord_energy.py
+
+      - name: Save sent history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main
+          git add sent_history_energy.json
+          git diff --cached --quiet || git commit -m "update energy sent history [skip ci]"
           git push
