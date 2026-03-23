@@ -426,7 +426,16 @@ def main():
         print("기사 없음")
         return
 
+    # 당일 기사 우선, 부족하면 전날까지 포함하여 20건 확보
+    target_dates = [target_date]
     day_articles = [a for a in articles if a.get('date') == target_date]
+    if len(day_articles) < 20:
+        prev_dates = [d for d in dates if d < target_date]
+        if prev_dates:
+            prev_date = prev_dates[0]
+            target_dates.append(prev_date)
+            day_articles += [a for a in articles if a.get('date') == prev_date]
+
     for a in day_articles:
         a['total_score'] = calc_total(a)
     day_articles.sort(key=lambda x: x['total_score'], reverse=True)
@@ -446,7 +455,8 @@ def main():
         if len(candidates) >= 50:
             break
 
-    print(f"Date: {target_date} | {len(day_articles)}건, 중복 {skipped_dup}건 제외, 후보 {len(candidates)}개")
+    date_label = ' + '.join(target_dates)
+    print(f"Date: {date_label} | {len(day_articles)}건, 중복 {skipped_dup}건 제외, 후보 {len(candidates)}개")
 
     if not candidates:
         print("새로 보낼 기사 없음 (모두 기발송)")
