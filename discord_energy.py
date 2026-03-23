@@ -31,11 +31,8 @@ SENT_HISTORY = OUTPUT_DIR / "sent_history_energy.json"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 AUDIO_DIR.mkdir(exist_ok=True)
 
-# ── Discord 웹훅 URL (환경변수 또는 직접 입력) ──
-WEBHOOK_URL = os.environ.get(
-    "DISCORD_ENERGY_WEBHOOK_URL",
-    "https://discordapp.com/api/webhooks/1483817944164335766/4lKHXcfIBPPeq-IMzqfjOIl8VZ9fjxsW-1Mv-6KnIZ-CguHPXKoZ18nOIPCeQJ1f5-H_"
-)
+# ── Discord 웹훅 URL (환경변수 필수) ──
+WEBHOOK_URL = os.environ.get("DISCORD_ENERGY_WEBHOOK_URL", "")
 
 TTS_VOICE = "ko-KR-SunHiNeural"
 
@@ -360,14 +357,33 @@ def summarize_text(text, num_sentences=3):
     return ' '.join(sentences)
 
 
-async def generate_tts(text, filepath):
+async def _generate_tts_async(text, filepath):
     communicate = edge_tts.Communicate(text, TTS_VOICE)
     await communicate.save(str(filepath))
+
+
+def generate_tts(text, filepath):
+    """이벤트 루프 충돌 방지: 기존 루프가 있으면 nest_asyncio 사용"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import nest_asyncio
+        nest_asyncio.apply()
+        loop.run_until_complete(_generate_tts_async(text, filepath))
+    else:
+        asyncio.run(_generate_tts_async(text, filepath))
 
 
 def send_discord_embed(embeds):
     data = {'username': 'Energy News Bot', 'embeds': embeds}
     resp = requests.post(WEBHOOK_URL, json=data)
+    if resp.status_code == 401:
+        print(f"  [!] Discord 401 Unauthorized — 웹훅 URL이 유효하지 않습니다!")
+        print(f"  GitHub Secrets에서 DISCORD_ENERGY_WEBHOOK_URL을 확인하세요.")
+        raise SystemExit(1)
     if resp.status_code not in (200, 204):
         print(f"  [!] Discord {resp.status_code}")
     time.sleep(1)
@@ -380,17 +396,20 @@ def send_discord_audio(filepath, message=""):
             data['content'] = message
         files = {'file': (filepath.name, f, 'audio/mpeg')}
         resp = requests.post(WEBHOOK_URL, data=data, files=files)
+        if resp.status_code == 401:
+            print(f"  [!] Discord 401 Unauthorized — 웹훅 URL이 유효하지 않습니다!")
+            raise SystemExit(1)
         if resp.status_code not in (200, 204):
             print(f"  [!] Audio upload {resp.status_code}")
     time.sleep(1)
 
 
 def main():
-    if 'YOUR_DISCORD_WEBHOOK_URL_HERE' in WEBHOOK_URL:
+    if not WEBHOOK_URL:
         print("=" * 50)
-        print("  [!] Discord 웹훅 URL을 설정해주세요!")
-        print("  discord_energy.py 파일에서 WEBHOOK_URL 수정")
-        print("  또는 환경변수 DISCORD_ENERGY_WEBHOOK_URL 설정")
+        print("  [!] Discord 웹훅 URL이 설정되지 않았습니다!")
+        print("  환경변수 DISCORD_ENERGY_WEBHOOK_URL을 설정해주세요.")
+        print("  GitHub Actions: Settings > Secrets에 추가")
         print("=" * 50)
         return
 
@@ -501,7 +520,7 @@ def main():
     audio_path = AUDIO_DIR / f"energy_briefing_{target_date}.mp3"
 
     try:
-        asyncio.run(generate_tts(tts_text, audio_path))
+        generate_tts(tts_text, audio_path)
         print(f"  음성 저장: {audio_path.name}")
         tts_ok = True
     except Exception as e:

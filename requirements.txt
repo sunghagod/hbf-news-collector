@@ -3,6 +3,7 @@ requests>=2.31
 deep-translator>=1.11
 newspaper4k>=0.9
 edge-tts>=7.0
+nest_asyncio>=1.5
 playwright>=1.40
 googlenewsdecoder>=0.1
 yfinance>=0.2
