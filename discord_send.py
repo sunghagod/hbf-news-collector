@@ -308,10 +308,25 @@ def summarize_text(text, num_sentences=3):
     return ' '.join(sentences)
 
 
-async def generate_tts(text, filepath):
+async def _generate_tts_async(text, filepath):
     """edge-tts로 한국어 음성 파일 생성"""
     communicate = edge_tts.Communicate(text, TTS_VOICE)
     await communicate.save(str(filepath))
+
+
+def generate_tts(text, filepath):
+    """이벤트 루프 충돌 방지: 기존 루프가 있으면 nest_asyncio 사용"""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import nest_asyncio
+        nest_asyncio.apply()
+        loop.run_until_complete(_generate_tts_async(text, filepath))
+    else:
+        asyncio.run(_generate_tts_async(text, filepath))
 
 
 def send_discord_embed(embeds):
@@ -440,7 +455,7 @@ def main():
     audio_path = AUDIO_DIR / f"hbf_briefing_{target_date}.mp3"
 
     try:
-        asyncio.run(generate_tts(tts_text, audio_path))
+        generate_tts(tts_text, audio_path)
         print(f"  음성 저장: {audio_path.name}")
         tts_ok = True
     except Exception as e:
