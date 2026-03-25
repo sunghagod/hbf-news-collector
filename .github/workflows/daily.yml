@@ -90,3 +90,47 @@ jobs:
           git add sent_history_energy.json
           git diff --cached --quiet || git commit -m "update energy sent history [skip ci]"
           git push
+
+  realestate:
+    name: Real Estate Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: energy
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Collect articles
+        run: python collect_realestate.py
+
+      - name: Generate daily report
+        run: python daily_realestate.py
+
+      - name: Send to Discord
+        env:
+          DISCORD_REALESTATE_WEBHOOK_URL: ${{ secrets.DISCORD_REALESTATE_WEBHOOK_URL }}
+        run: python discord_realestate.py
+
+      - name: Save sent history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp sent_history_realestate.json /tmp/sent_history_realestate.json
+          git checkout -- .
+          git pull --rebase origin main
+          cp /tmp/sent_history_realestate.json sent_history_realestate.json
+          git add sent_history_realestate.json
+          git diff --cached --quiet || git commit -m "update realestate sent history [skip ci]"
+          git push
