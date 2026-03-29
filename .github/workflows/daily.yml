@@ -134,3 +134,44 @@ jobs:
           git add sent_history_realestate.json
           git diff --cached --quiet || git commit -m "update realestate sent history [skip ci]"
           git push
+
+  geopolitics:
+    name: Geopolitics Pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: realestate
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: Collect articles
+        run: python collect_geopolitics.py
+
+      - name: Send to Discord
+        env:
+          DISCORD_GEOPOLITICS_WEBHOOK_URL: ${{ secrets.DISCORD_GEOPOLITICS_WEBHOOK_URL }}
+        run: python discord_geopolitics.py
+
+      - name: Save sent history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp sent_history_geopolitics.json /tmp/sent_history_geopolitics.json
+          git checkout -- .
+          git pull --rebase origin main
+          cp /tmp/sent_history_geopolitics.json sent_history_geopolitics.json
+          git add sent_history_geopolitics.json
+          git diff --cached --quiet || git commit -m "update geopolitics sent history [skip ci]"
+          git push

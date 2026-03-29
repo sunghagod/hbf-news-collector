@@ -229,6 +229,49 @@ def translate_text(text):
         return text
 
 
+JS_ACCEPT_COOKIES = """
+() => {
+    const btnSelectors = [
+        '[id*="cookie"] button', '[class*="cookie"] button',
+        '[id*="consent"] button', '[class*="consent"] button',
+        '[id*="gdpr"] button', '[class*="gdpr"] button',
+        '[class*="banner"] button[class*="accept"]',
+        '[class*="banner"] button[class*="agree"]',
+        'button[id*="accept"]', 'button[class*="accept"]',
+        'button[id*="agree"]', 'button[class*="agree"]',
+        '[aria-label*="accept" i]', '[aria-label*="agree" i]',
+        '[aria-label*="동의" i]', '[aria-label*="수락" i]',
+        '[class*="cookie-accept"]', '[class*="cookie-agree"]',
+        '#onetrust-accept-btn-handler',
+        '.fc-cta-consent', '.fc-button.fc-cta-consent',
+        '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+        '.cc-btn.cc-allow', '.cc-accept',
+        '[data-testid="cookie-accept"]',
+    ];
+    for (const sel of btnSelectors) {
+        try {
+            const btns = document.querySelectorAll(sel);
+            for (const btn of btns) {
+                const text = (btn.innerText || '').toLowerCase();
+                if (text.match(/(accept|agree|allow|ok|확인|동의|수락|허용|닫기|close|got it|i understand)/)) {
+                    btn.click();
+                    return 'clicked: ' + sel;
+                }
+            }
+        } catch(e) {}
+    }
+    const allBtns = document.querySelectorAll('button, a[role="button"], [class*="btn"]');
+    for (const btn of allBtns) {
+        const text = (btn.innerText || '').trim().toLowerCase();
+        if (text.match(/^(accept all|accept cookies|agree|allow all|i agree|동의|수락|허용|쿠키 허용|모두 허용|확인)$/)) {
+            btn.click();
+            return 'clicked fallback: ' + text;
+        }
+    }
+    return 'no cookie banner found';
+}
+"""
+
 JS_EXTRACT_TEXT = """
 () => {
     const selectors = [
@@ -321,7 +364,14 @@ def resolve_and_extract(articles):
                     pw_page = pw_ctx.new_page()
 
                 pw_page.goto(real_url, wait_until='domcontentloaded', timeout=15000)
-                pw_page.wait_for_timeout(2000)
+                pw_page.wait_for_timeout(1500)
+                # 쿠키 동의 배너 자동 수락
+                try:
+                    cookie_result = pw_page.evaluate(JS_ACCEPT_COOKIES)
+                    if 'clicked' in cookie_result:
+                        pw_page.wait_for_timeout(1000)
+                except Exception:
+                    pass
                 body = pw_page.evaluate(JS_EXTRACT_TEXT)
                 if body and len(body) < 100:
                     body = None
@@ -342,6 +392,27 @@ def resolve_and_extract(articles):
 
     print(f"  추출 성공: {len(results)}/{decode_ok} (디코딩 성공 기사 중)")
     return results
+
+
+NOISE_KEYWORDS = re.compile(
+    r'쿠키|cookie|개인정보|privacy\s*policy|비밀번호.*저장|password.*save|'
+    r'로그인.*저장|로그인\s*정보|sign\s*in.*remember|log\s*in.*save|'
+    r'we\s+use\s+cookies|this\s+site\s+uses?\s+cookies|'
+    r'GDPR|CCPA|데이터\s*보호|consent|동의.*약관|'
+    r'광고\s*차단|ad\s*block|paywall|'
+    r'확인란.*선택|사용자\s*ID.*비밀번호|'
+    r'browsing\s*experience|tracking\s*technolog',
+    re.IGNORECASE
+)
+
+def clean_body_text(text):
+    """쿠키 동의, 로그인 팝업, 개인정보 안내 등 비기사 문장 제거"""
+    if not text:
+        return text
+    parts = re.split(r'(?<=[.!?다요])\s+', text.replace('\n', ' '))
+    cleaned = [s for s in parts if s.strip() and not NOISE_KEYWORDS.search(s)]
+    result = ' '.join(cleaned).strip()
+    return result if len(result) > 20 else text
 
 
 def summarize_text(text, num_sentences=3):
@@ -478,6 +549,7 @@ def main():
         body = result['body']
         real_url = result['real_url']
 
+        body = clean_body_text(body)
         summary_en = summarize_text(body, num_sentences=3)
         title_ko = translate_text(art['title'])
         summary_ko = translate_text(summary_en)

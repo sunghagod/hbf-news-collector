@@ -1,15 +1,14 @@
 """
-Discord 웹훅으로 HBF Daily Top 20 전송
-- 본문 추출 성공한 기사만 순위 포함 (실패 시 차순위로 대체)
-- Playwright로 URL 변환 → newspaper4k 본문 추출 → 한국어 번역/요약
-- edge-tts로 요약 음성 생성 → Discord 음성 파일 전송
-- 전부 무료
+Discord 웹훅으로 Geopolitics Daily Top 20 전송
+- gnewsdecoder URL 디코딩 → 본문 추출 → 한국어 번역/요약
+- edge-tts 음성 브리핑 → Discord 전송
 """
 
 import json
 import sys
 import io
 import os
+import re
 import time
 import asyncio
 import hashlib
@@ -27,18 +26,18 @@ import edge_tts
 from googlenewsdecoder import gnewsdecoder
 
 OUTPUT_DIR = Path(__file__).parent
-ARTICLES_JSON = OUTPUT_DIR / "articles.json"
-SENT_HISTORY = OUTPUT_DIR / "sent_history.json"
+ARTICLES_JSON = OUTPUT_DIR / "articles_geopolitics.json"
+SENT_HISTORY = OUTPUT_DIR / "sent_history_geopolitics.json"
 AUDIO_DIR = OUTPUT_DIR / "audio"
 AUDIO_DIR.mkdir(exist_ok=True)
 
+# ── Discord 웹훅 URL ──
 WEBHOOK_URL = os.environ.get(
-    "DISCORD_WEBHOOK_URL",
-    "https://discordapp.com/api/webhooks/1481357268867092575/nyWsUK8gyZ9BdsWlsBq55xLCDtycaAU6xJ_9AhZYpi1OXZI_qUR9rZo5FkmGNVk34J3V"
+    "DISCORD_GEOPOLITICS_WEBHOOK_URL",
+    "https://discordapp.com/api/webhooks/1487667961920753745/hs490ZtzDPzfEBT5lVpFSxK9zVwqiBtsPz-3IMqf3cRss4DJmfAMWPAelyNXomRLr-_t"
 )
 
-# edge-tts 한국어 음성
-TTS_VOICE = "ko-KR-SunHiNeural"  # 여성 / ko-KR-InJoonNeural = 남성
+TTS_VOICE = "ko-KR-SunHiNeural"
 
 KOREAN_INDICATORS = [
     '.co.kr', '.kr/', 'chosun', 'joongang', 'joins.com', 'donga',
@@ -49,28 +48,55 @@ KOREAN_INDICATORS = [
     'businesskorea', 'pulsenews', 'theinvestor', 'korea',
     'kmib', 'nocutnews', 'fnnews', 'newspim', 'dt.co.kr',
     'inews24', 'ddaily', 'businesspost', 'mt.co.kr', 'zdnet.co.kr',
-    '조선', '중앙', '동아', '한겨레', '경향', '매일경제', '한국경제', '연합', '전자신문',
 ]
 
-HBF_KEYWORDS = {
-    'HBF': 5, 'HIGH BANDWIDTH FLASH': 5,
-    'MASS PRODUCTION': 4, 'FABRICATION': 4, 'MANUFACTURING': 4,
-    'PRODUCTION': 3, 'PROTOTYPE': 4, 'SAMPLE': 4,
-    'TAPE-OUT': 4, 'TAPE OUT': 4, 'YIELD': 4,
-    'DEVELOPMENT': 3, 'PROGRESS': 3, 'BREAKTHROUGH': 4,
-    'MILESTONE': 4, 'UNVEIL': 3, 'LAUNCH': 3,
-    'STANDARDIZATION': 4, 'STANDARD': 3, 'CONSORTIUM': 3,
-    'ARCHITECTURE': 3, 'BANDWIDTH': 3, 'PERFORMANCE': 2,
-    'INFERENCE': 3, 'NAND': 2, 'FLASH': 2, 'STACKING': 3,
-    'SK HYNIX': 2, 'SAMSUNG': 1, 'SANDISK': 2, 'KIOXIA': 2,
+GEOPOLITICS_KEYWORDS = {
+    'WAR': 3, 'CONFLICT': 3, 'SANCTIONS': 4, 'TARIFF': 4,
+    'TRADE WAR': 5, 'DIPLOMACY': 3, 'SUMMIT': 4,
+    'MISSILE': 4, 'NUCLEAR': 4, 'NATO': 3,
+    'CEASEFIRE': 5, 'INVASION': 5, 'MILITARY': 3,
+    'ALLIANCE': 3, 'EMBARGO': 4, 'EXPORT CONTROL': 5,
+    'SOUTH CHINA SEA': 5, 'TAIWAN': 4, 'NORTH KOREA': 4,
+    'UKRAINE': 3, 'RUSSIA': 3, 'CHINA': 2, 'IRAN': 3,
+    'BRICS': 4, 'G7': 3, 'G20': 3, 'UNITED NATIONS': 3,
+    'HUMANITARIAN': 3, 'REFUGEE': 3, 'PEACE': 3,
+    'CYBER ATTACK': 5, 'ARMS DEAL': 4, 'DEFENSE': 3,
+    'FOREIGN POLICY': 4, 'INDO-PACIFIC': 4,
+    'CRISIS': 3, 'TERRITORIAL': 4, 'OCCUPATION': 4,
+    'BREAKTHROUGH': 4, 'ESCALATION': 5, 'DE-ESCALATION': 5,
 }
-DARIO_KEYWORDS = {'DARIO AMODEI': 5, 'DARIO': 3, 'ANTHROPIC': 2}
+
+# ── 번역 시 원문 유지할 고유명사 ──
+PROPER_NOUNS = [
+    # 국제기구
+    'NATO', 'BRICS', 'ASEAN', 'AUKUS', 'QUAD',
+    'United Nations', 'UN', 'EU', 'G7', 'G20',
+    'IMF', 'World Bank', 'WTO', 'ICC', 'ICJ',
+    'IAEA', 'WHO', 'UNHCR', 'OPEC',
+    # 싱크탱크
+    'CFR', 'CSIS', 'RAND', 'Brookings', 'Chatham House',
+    # 인물
+    'Biden', 'Trump', 'Xi Jinping', 'Putin', 'Zelensky',
+    'Macron', 'Scholz', 'Modi', 'Kishida', 'Erdogan',
+    'Netanyahu', 'Kim Jong Un', 'Starmer', 'Sunak',
+    # 국가/지역
+    'Indo-Pacific', 'South China Sea', 'Taiwan Strait',
+    'Gaza', 'West Bank', 'Crimea', 'Donbas',
+    # 무기/군사
+    'ICBM', 'THAAD', 'Patriot', 'HIMARS', 'F-35', 'S-400',
+    'Abrams', 'Leopard', 'Javelin', 'Stinger',
+    # 조약/협정
+    'JCPOA', 'START', 'AUKUS', 'RCEP', 'CPTPP',
+    'Paris Agreement', 'Minsk Agreement',
+    # 기타
+    'AI', 'SWIFT', 'CHIPS Act', 'IRA',
+    'Inflation Reduction Act',
+]
 
 translator = GoogleTranslator(source='en', target='ko')
 
 
 def load_sent_history():
-    """이미 발송한 기사 해시 목록 로드"""
     if SENT_HISTORY.exists():
         try:
             with open(SENT_HISTORY, 'r', encoding='utf-8') as f:
@@ -81,47 +107,16 @@ def load_sent_history():
 
 
 def save_sent_history(sent_set):
-    """발송한 기사 해시 목록 저장"""
     with open(SENT_HISTORY, 'w', encoding='utf-8') as f:
         json.dump(sorted(sent_set), f, ensure_ascii=False)
 
 
 def article_hash(art):
-    """기사 제목 기반 해시 (중복 판별용)"""
     title = art.get('title', '').strip().lower()
     return hashlib.md5(title.encode()).hexdigest()[:16]
 
-# ── 번역 시 원문 유지할 고유명사 ──
-PROPER_NOUNS = [
-    # 회사/조직
-    'SK hynix', 'SK Hynix', 'Samsung Electronics', 'Samsung',
-    'SanDisk', 'Sandisk', 'Kioxia', 'Micron', 'NVIDIA', 'Nvidia',
-    'Applied Materials', 'TSMC', 'Intel', 'Qualcomm', 'Broadcom',
-    'AMD', 'ARM', 'Arm', 'Apple', 'Google', 'Microsoft', 'Meta',
-    'Anthropic', 'OpenAI', 'Western Digital', 'Nanya', 'ASML',
-    'Lam Research', 'Tokyo Electron', 'GlobalFoundries',
-    'Goldman Sachs', 'Morgan Stanley', 'JP Morgan', 'Citi', 'Barclays',
-    'TrendForce', 'SemiAnalysis', 'TechInsights', 'Digitimes',
-    # 인물
-    'Dario Amodei', 'Jensen Huang', 'Kwak Noh-Jung', 'Jay Y. Lee',
-    'Lisa Su', 'Pat Gelsinger', 'Sam Altman', 'Elon Musk',
-    # 기술 용어 (영문 유지)
-    'HBF', 'HBM', 'HBM4', 'HBM3E', 'HBM3', 'LPDDR6', 'LPDDR5X',
-    'DDR5', 'DDR6', 'GDDR7', 'DRAM', 'NAND', 'SRAM',
-    'CXL', 'PCIe', 'NVMe', 'TSV', 'GAA', 'FinFET', 'EUV',
-    'CoWoS', 'SoIC', 'FOWLP', 'RDL', 'SiP',
-    'GPU', 'CPU', 'NPU', 'TPU', 'SoC', 'ASIC', 'FPGA',
-    'AI', 'LLM', 'AGI', 'GPT', 'Claude',
-    'GB/s', 'TB/s', 'Gbps', 'GHz', 'nm', '1c', '1b', '1a',
-    # 제품명
-    'Blackwell', 'Hopper', 'Rubin', 'Grace', 'Gaudi',
-    'Exynos', 'Snapdragon', 'Dimensity',
-]
-
 
 def protect_proper_nouns(text):
-    """고유명사를 플레이스홀더로 치환 (번역 보호)"""
-    # 긴 것부터 먼저 치환 (SK hynix > SK 순서)
     sorted_nouns = sorted(PROPER_NOUNS, key=len, reverse=True)
     replacements = []
     for noun in sorted_nouns:
@@ -133,7 +128,6 @@ def protect_proper_nouns(text):
 
 
 def restore_proper_nouns(text, replacements):
-    """플레이스홀더를 원래 고유명사로 복원"""
     for placeholder, noun in replacements:
         text = text.replace(placeholder, noun)
     return text
@@ -146,34 +140,22 @@ def is_korean(art):
 
 def calc_total(art):
     upper = art['title'].upper()
-    cat = art.get('category', 'hbf')
     score = 0
-    kws = DARIO_KEYWORDS if cat == 'dario' else HBF_KEYWORDS
-    for kw, w in kws.items():
+    for kw, w in GEOPOLITICS_KEYWORDS.items():
         if kw in upper:
             score += w
-    if cat != 'dario' and ('HBF' in upper or 'HIGH BANDWIDTH FLASH' in upper):
-        score += 10
-        for w in ['PRODUCTION', 'PROTOTYPE', 'SAMPLE', 'FABRICAT', 'MANUFACTUR',
-                   'BREAKTHROUGH', 'MILESTONE', 'STANDARD', 'UNVEIL', 'LAUNCH', 'TAPE']:
-            if w in upper:
-                score += 3
     tier_s = {1: 10, 2: 7, 3: 4, 4: 1}.get(art.get('tier', 4), 1)
     return round(score * 0.7 + tier_s * 0.3, 1)
 
 
 def translate_text(text):
-    """영어 → 한국어 번역 (고유명사는 원문 유지)"""
     if not text:
         return ''
     try:
         if len(text) > 4500:
             text = text[:4500]
-        # 고유명사 보호
         protected, replacements = protect_proper_nouns(text)
-        # 번역
         translated = translator.translate(protected)
-        # 고유명사 복원
         result = restore_proper_nouns(translated, replacements)
         return result
     except Exception:
@@ -306,7 +288,6 @@ def resolve_and_extract(articles):
         if not body:
             try:
                 if pw_browser is None:
-                    from playwright.sync_api import sync_playwright
                     pw = sync_playwright().start()
                     pw_browser = pw.chromium.launch(headless=True)
                     pw_ctx = pw_browser.new_context(
@@ -380,13 +361,11 @@ def summarize_text(text, num_sentences=3):
 
 
 async def _generate_tts_async(text, filepath):
-    """edge-tts로 한국어 음성 파일 생성"""
     communicate = edge_tts.Communicate(text, TTS_VOICE)
     await communicate.save(str(filepath))
 
 
 def generate_tts(text, filepath):
-    """이벤트 루프 충돌 방지: 기존 루프가 있으면 nest_asyncio 사용"""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -401,31 +380,38 @@ def generate_tts(text, filepath):
 
 
 def send_discord_embed(embeds):
-    data = {'username': 'HBF News Bot', 'embeds': embeds}
+    data = {'username': 'Geopolitics News Bot', 'embeds': embeds}
     resp = requests.post(WEBHOOK_URL, json=data)
+    if resp.status_code == 401:
+        print(f"  [!] Discord 401 Unauthorized — 웹훅 URL이 유효하지 않습니다!")
+        raise SystemExit(1)
     if resp.status_code not in (200, 204):
         print(f"  [!] Discord {resp.status_code}")
     time.sleep(1)
 
 
 def send_discord_audio(filepath, message=""):
-    """Discord에 음성 파일 전송"""
     with open(filepath, 'rb') as f:
-        data = {'username': 'HBF News Bot'}
+        data = {'username': 'Geopolitics News Bot'}
         if message:
             data['content'] = message
         files = {'file': (filepath.name, f, 'audio/mpeg')}
         resp = requests.post(WEBHOOK_URL, data=data, files=files)
+        if resp.status_code == 401:
+            print(f"  [!] Discord 401 Unauthorized — 웹훅 URL이 유효하지 않습니다!")
+            raise SystemExit(1)
         if resp.status_code not in (200, 204):
             print(f"  [!] Audio upload {resp.status_code}")
     time.sleep(1)
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--date', help='특정 날짜 지정 (YYYY-MM-DD)')
-    args = parser.parse_args()
+    if not WEBHOOK_URL:
+        print("=" * 50)
+        print("  [!] Discord 웹훅 URL이 설정되지 않았습니다!")
+        print("  환경변수 DISCORD_GEOPOLITICS_WEBHOOK_URL을 설정해주세요.")
+        print("=" * 50)
+        return
 
     with open(ARTICLES_JSON, 'r', encoding='utf-8') as f:
         articles = json.load(f)
@@ -435,17 +421,21 @@ def main():
 
     today = datetime.now().strftime('%Y-%m-%d')
     dates = sorted(set(a['date'] for a in articles if a.get('date')), reverse=True)
-
-    if args.date:
-        target_date = args.date
-    else:
-        target_date = today if today in dates else (dates[0] if dates else None)
-
+    target_date = today if today in dates else (dates[0] if dates else None)
     if not target_date:
         print("기사 없음")
         return
 
+    # 당일 기사 우선, 부족하면 전날까지 포함하여 20건 확보
+    target_dates = [target_date]
     day_articles = [a for a in articles if a.get('date') == target_date]
+    if len(day_articles) < 20:
+        prev_dates = [d for d in dates if d < target_date]
+        if prev_dates:
+            prev_date = prev_dates[0]
+            target_dates.append(prev_date)
+            day_articles += [a for a in articles if a.get('date') == prev_date]
+
     for a in day_articles:
         a['total_score'] = calc_total(a)
     day_articles.sort(key=lambda x: x['total_score'], reverse=True)
@@ -454,7 +444,6 @@ def main():
     sent_history = load_sent_history()
     print(f"  기존 발송 이력: {len(sent_history)}건")
 
-    # 이미 보낸 기사 제외
     candidates = []
     skipped_dup = 0
     for a in day_articles:
@@ -466,19 +455,20 @@ def main():
         if len(candidates) >= 50:
             break
 
-    print(f"Date: {target_date} | {len(day_articles)}건, 중복 {skipped_dup}건 제외, 후보 {len(candidates)}개")
+    date_label = ' + '.join(target_dates)
+    print(f"Date: {date_label} | {len(day_articles)}건, 중복 {skipped_dup}건 제외, 후보 {len(candidates)}개")
 
     if not candidates:
         print("새로 보낼 기사 없음 (모두 기발송)")
         return
 
-    # ── Step 1+2: Playwright로 URL 변환 + 본문 추출 한 번에 ──
+    # ── Step 1+2: URL 디코딩 + 본문 추출 ──
     extract_results = resolve_and_extract(candidates)
 
     # ── 본문 추출 성공한 기사만 Top 20 선별 ──
-    top10 = []
+    top_articles = []
     for art in candidates:
-        if len(top10) >= 20:
+        if len(top_articles) >= 20:
             break
 
         result = extract_results.get(art['link'])
@@ -499,32 +489,32 @@ def main():
         art['title_ko'] = title_ko
         art['summary_ko'] = summary_ko[:400]
         art['real_url'] = real_url
-        top10.append(art)
+        top_articles.append(art)
 
     print(f"  중복 스킵: {skipped_dup}건")
-    print(f"\n  최종 전송 대상: {len(top10)}건")
+    print(f"\n  최종 전송 대상: {len(top_articles)}건")
 
-    if not top10:
+    if not top_articles:
         print("본문 추출 가능한 기사 없음")
         return
 
-    # ── Step 3: TTS 음성 생성 (존댓말) ──
+    # ── Step 3: TTS 음성 생성 ──
     print("\n  음성 생성 중...")
     tts_lines = []
-    tts_lines.append(f"안녕하세요. {target_date} HBF 뉴스 브리핑을 시작하겠습니다.")
+    tts_lines.append(f"안녕하세요. {target_date} 국제정세 뉴스 브리핑을 시작하겠습니다.")
     tts_lines.append("")
 
-    for i, art in enumerate(top10):
+    for i, art in enumerate(top_articles):
         rank = i + 1
         tts_lines.append(f"{rank}번째 기사입니다.")
         tts_lines.append(art['title_ko'])
         tts_lines.append(art['summary_ko'])
         tts_lines.append("")
 
-    tts_lines.append("이상으로 오늘의 HBF 뉴스 브리핑을 마치겠습니다. 감사합니다.")
+    tts_lines.append("이상으로 오늘의 국제정세 뉴스 브리핑을 마치겠습니다. 감사합니다.")
 
     tts_text = '\n'.join(tts_lines)
-    audio_path = AUDIO_DIR / f"hbf_briefing_{target_date}.mp3"
+    audio_path = AUDIO_DIR / f"geopolitics_briefing_{target_date}.mp3"
 
     try:
         generate_tts(tts_text, audio_path)
@@ -535,29 +525,32 @@ def main():
         tts_ok = False
 
     # ── Step 4: Discord 전송 ──
-    cat_colors = {'hbf': 0x4fc3f7, 'samsung': 0x1a73e8, 'skhynix': 0xff6d00, 'dario': 0xe040fb}
-    cat_labels = {'hbf': 'HBF', 'samsung': 'Samsung', 'skhynix': 'SK hynix', 'dario': 'Dario Amodei'}
-    tier_emojis = {1: ':star:', 2: ':blue_circle:', 3: ':green_circle:', 4: ':white_circle:'}
+    cat_colors = {
+        'diplomacy': 0x42a5f5, 'security': 0xef5350,
+        'trade': 0xffa726, 'conflict': 0xab47bc,
+    }
+    cat_labels = {
+        'diplomacy': 'Diplomacy', 'security': 'Security',
+        'trade': 'Trade', 'conflict': 'Conflict',
+    }
+    tier_emojis = {1: ':star:', 2: ':green_circle:', 3: ':blue_circle:', 4: ':white_circle:'}
     rank_medals = {0: ':first_place:', 1: ':second_place:', 2: ':third_place:'}
 
-    # 헤더
     header = {
-        'title': f':newspaper:  HBF Daily Top 20 — {target_date}',
+        'title': f':globe_with_meridians:  Geopolitics Daily Top 20 — {target_date}',
         'description': (
             f':loud_sound: 음성 브리핑 포함\n'
-            f'본문 요약 + 한국어 번역 | 전체 {len(day_articles)}건 중 상위 {len(top10)}개'
+            f'Tier 1~3 매체만 | 전체 {len(day_articles)}건 중 상위 {len(top_articles)}개'
         ),
-        'color': 0x4fc3f7,
+        'color': 0x42a5f5,
     }
     send_discord_embed([header])
 
-    # 음성 파일 전송
     if tts_ok and audio_path.exists():
-        send_discord_audio(audio_path, f":loud_sound: **{target_date} HBF 뉴스 브리핑** (음성)")
+        send_discord_audio(audio_path, f":loud_sound: **{target_date} 국제정세 뉴스 브리핑** (음성)")
 
-    # 기사 카드 전송
-    for i, art in enumerate(top10):
-        cat = art.get('category', 'hbf')
+    for i, art in enumerate(top_articles):
+        cat = art.get('category', 'diplomacy')
         color = cat_colors.get(cat, 0x888888)
         cat_label = cat_labels.get(cat, cat)
         tier = art.get('tier', 4)
@@ -582,13 +575,13 @@ def main():
         }
         send_discord_embed([embed])
 
-    # ── Step 5: 발송 이력 저장 (중복 방지) ──
-    for art in top10:
+    # ── Step 5: 발송 이력 저장 ──
+    for art in top_articles:
         sent_history.add(article_hash(art))
     save_sent_history(sent_history)
     print(f"  발송 이력 저장: 총 {len(sent_history)}건")
 
-    print(f"\nDiscord 전송 완료! (Top {len(top10)}, 번역 + 요약 + 음성)")
+    print(f"\nDiscord 전송 완료! (Top {len(top_articles)}, 번역 + 요약 + 음성)")
 
 
 if __name__ == '__main__':
