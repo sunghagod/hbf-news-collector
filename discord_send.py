@@ -39,7 +39,7 @@ WEBHOOK_URL = os.environ.get(
 )
 
 # edge-tts 한국어 음성
-TTS_VOICE = "ko-KR-SunHiNeural"  # 여성 / ko-KR-InJoonNeural = 남성
+TTS_VOICE = "en-US-EmmaMultilingualNeural"  # 다국어 여성 (한국어 지원)
 
 KOREAN_INDICATORS = [
     '.co.kr', '.kr/', 'chosun', 'joongang', 'joins.com', 'donga',

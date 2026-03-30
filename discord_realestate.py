@@ -37,7 +37,7 @@ WEBHOOK_URL = os.environ.get(
     "https://discordapp.com/api/webhooks/1486327929435590768/97ACKAtI6YmXFuwCNRcJlx-grAMv_xLc5DRjeG3FURpTGn2dP5NIaiLd84-NmuEwLaxS"
 )
 
-TTS_VOICE = "ko-KR-SunHiNeural"
+TTS_VOICE = "en-US-EmmaMultilingualNeural"  # 다국어 여성 (한국어 지원)
 
 # ── 부동산 점수 키워드 ──
 REALESTATE_KEYWORDS = {

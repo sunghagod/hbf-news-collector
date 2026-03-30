@@ -35,7 +35,7 @@ AUDIO_DIR.mkdir(exist_ok=True)
 # ── Discord 웹훅 URL (환경변수 필수) ──
 WEBHOOK_URL = os.environ.get("DISCORD_ENERGY_WEBHOOK_URL", "")
 
-TTS_VOICE = "ko-KR-SunHiNeural"
+TTS_VOICE = "en-US-EmmaMultilingualNeural"  # 다국어 여성 (한국어 지원)
 
 KOREAN_INDICATORS = [
     '.co.kr', '.kr/', 'chosun', 'joongang', 'joins.com', 'donga',

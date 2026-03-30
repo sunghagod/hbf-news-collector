@@ -37,7 +37,7 @@ WEBHOOK_URL = os.environ.get(
     "https://discordapp.com/api/webhooks/1487667961920753745/hs490ZtzDPzfEBT5lVpFSxK9zVwqiBtsPz-3IMqf3cRss4DJmfAMWPAelyNXomRLr-_t"
 )
 
-TTS_VOICE = "ko-KR-SunHiNeural"
+TTS_VOICE = "en-US-EmmaMultilingualNeural"  # 다국어 여성 (한국어 지원)
 
 KOREAN_INDICATORS = [
     '.co.kr', '.kr/', 'chosun', 'joongang', 'joins.com', 'donga',
