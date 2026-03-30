@@ -52,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: hbf
+    if: ${{ !cancelled() }}
 
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +68,9 @@ jobs:
         run: |
           pip install -r requirements.txt
           playwright install chromium --with-deps
+
+      - name: Pull latest
+        run: git pull --rebase origin main
 
       - name: Collect articles
         run: python collect_energy.py
@@ -96,6 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: energy
+    if: ${{ !cancelled() }}
 
     steps:
       - uses: actions/checkout@v4
@@ -111,6 +116,9 @@ jobs:
         run: |
           pip install -r requirements.txt
           playwright install chromium --with-deps
+
+      - name: Pull latest
+        run: git pull --rebase origin main
 
       - name: Collect articles
         run: python collect_realestate.py
@@ -140,6 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: realestate
+    if: ${{ !cancelled() }}
 
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +164,9 @@ jobs:
         run: |
           pip install -r requirements.txt
           playwright install chromium --with-deps
+
+      - name: Pull latest
+        run: git pull --rebase origin main
 
       - name: Collect articles
         run: python collect_geopolitics.py

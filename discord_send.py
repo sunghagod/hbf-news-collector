@@ -10,6 +10,7 @@ import json
 import sys
 import io
 import os
+import re
 import time
 import asyncio
 import hashlib
