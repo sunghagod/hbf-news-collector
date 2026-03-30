@@ -629,22 +629,14 @@ def main():
     tier_emojis = {1: ':star:', 2: ':green_circle:', 3: ':blue_circle:', 4: ':white_circle:'}
     rank_medals = {0: ':first_place:', 1: ':second_place:', 2: ':third_place:'}
 
-    header = {
-        'title': f':zap:  Energy Daily Top 20 — {target_date}',
-        'description': (
-            f':loud_sound: 음성 브리핑 포함\n'
-            f'Tier 1~3 매체만 | 전체 {len(day_articles)}건 중 상위 {len(top10)}개'
-        ),
-        'color': 0x66bb6a,
-    }
-    send_discord_embed([header])
-
+    # 음성 파일 먼저 전송 (찾기 쉽게)
     if tts_ok and audio_path.exists():
         send_discord_audio(audio_path, f":loud_sound: **{target_date} 에너지 뉴스 브리핑** (음성)")
 
+    # 통합 embed 구성
+    desc_lines = []
     for i, art in enumerate(top10):
         cat = art.get('category', 'renewable')
-        color = cat_colors.get(cat, 0x888888)
         cat_label = cat_labels.get(cat, cat)
         tier = art.get('tier', 4)
         tier_emoji = tier_emojis.get(tier, ':white_circle:')
@@ -653,20 +645,29 @@ def main():
         real_url = art.get('real_url', '')
         rank = rank_medals.get(i, f'`#{i+1}`')
 
-        description = f"**{art['title_ko']}**\n\n{art['summary_ko']}"
+        if i < 3:
+            title_line = f"[{art['title'][:80]}]({real_url})" if real_url else art['title'][:80]
+            summary = (art.get('summary_ko') or '')[:150]
+            desc_lines.append(f"{rank} **{art['title_ko'][:60]}**")
+            desc_lines.append(f"{title_line}")
+            desc_lines.append(f"> {summary}")
+            desc_lines.append(f"{tier_emoji} {source} · {cat_label} · `{score}점`\n")
+        else:
+            title_ko = (art.get('title_ko') or art.get('title', ''))[:50]
+            link = f"[링크]({real_url})" if real_url else ''
+            desc_lines.append(f"{rank} {title_ko} · `{score}점` {link}")
 
-        embed = {
-            'title': f"{rank}  {art['title'][:200]}",
-            'url': real_url,
-            'description': description,
-            'color': color,
-            'fields': [
-                {'name': 'Source', 'value': f'{tier_emoji} {source}', 'inline': True},
-                {'name': 'Topic', 'value': cat_label, 'inline': True},
-                {'name': 'Score', 'value': f'`{score}`', 'inline': True},
-            ],
-        }
-        send_discord_embed([embed])
+    description = '\n'.join(desc_lines)
+    if len(description) > 4090:
+        description = description[:4090] + '…'
+
+    embed = {
+        'title': f':zap:  Energy Daily Top 20 — {target_date}',
+        'description': description,
+        'color': 0x66bb6a,
+        'footer': {'text': f'Tier 1~3 매체 | 전체 {len(day_articles)}건 중 상위 {len(top10)}개'},
+    }
+    send_discord_embed([embed])
 
     # ── Step 5: 발송 이력 저장 ──
     for art in top10:
